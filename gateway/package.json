@@ -1,0 +1,16 @@
+{
+  "name": "taxi-whatsapp-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "بوابة واتساب (Baileys) لبوت تكسي — تشتغل على VPS وتتكلم مع Worker",
+  "scripts": {
+    "start": "node gateway.mjs",
+    "pair": "node gateway.mjs --pair"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "pino": "^9.4.0",
+    "qrcode": "^1.5.4"
+  }
+}

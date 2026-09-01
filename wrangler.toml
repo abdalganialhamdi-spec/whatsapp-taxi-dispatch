@@ -1,0 +1,16 @@
+name = "whatsapp-taxi-dispatch"
+main = "src/worker.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# لوحة الإدارة متاحة على /?key=ADMIN_KEY
+[vars]
+SERVICE_NAME = "whatsapp-taxi-dispatch"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "taxi-dispatch"
+database_id = "c4486bf4-b229-4d70-a90e-96c911f5f197"
+
+# SECRET: ADMIN_KEY — لا تضعه هنا أبداً
+#   npx wrangler secret put ADMIN_KEY
