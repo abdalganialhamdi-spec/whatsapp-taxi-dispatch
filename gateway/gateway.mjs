@@ -242,6 +242,16 @@ const server = createServer(async (req, res) => {
   }
 
   try {
+    // قائمة المجموعات التي يشارك فيها البوت
+    if (url.pathname === '/groups' && req.method === 'GET') {
+      const groups = await sock.groupFetchAllParticipating();
+      res.writeHead(200);
+      res.end(JSON.stringify({
+        groups: Object.entries(groups).map(([jid, g]) => ({ jid, name: g.subject, size: g.participants?.length ?? 0 })),
+      }));
+      return;
+    }
+
     // حالة الاتصال + QR الحالي (data URL)
     if (url.pathname === '/status') {
       res.writeHead(200);

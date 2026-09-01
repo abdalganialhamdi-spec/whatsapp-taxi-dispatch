@@ -3,7 +3,7 @@
  * Engine: pure-ish orchestration, no fetch here (gateway does IO).
  */
 
-import { parseMessage } from './nlu.js';
+import { parseMessage, normalizeArabic } from './nlu.js';
 import { aiParse, matchZoneByName } from './ai.js';
 import { computeFare, formatSYP } from './pricing.js';
 import { assertTransition } from './ride-state.js';
@@ -108,13 +108,28 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
       }
       assertTransition(active.status, 'DISPATCHING');
       await repo.updateRideStatus(env.DB, active.id, 'DISPATCHING');
-      const fresh = await repo.getRideById(env.DB, active.id);
-      const driver = fresh?.driver_id ? await repo.getDriverById(env.DB, fresh.driver_id) : null;
-      return [{
+
+      // نشر الطلب فوراً على مجموعة السائقين (من settings)
+      const setting = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'drivers_group_jid'`).first<{ value: string }>();
+      const out: OutboundMessage[] = [{
         chatId: msg.chatId,
-        text: `✅ تم القبول! عم ندور عالسائق الأقرب 🔎
-عم نبلغك بأول ما حدا قبل — عادة بأقل من دقيقتين.`,
+        text: `✅ تم القبول! عم نرسل طلبك للسائقين 🔎
+أول سائق يوافق بيوصلك بياناته.`,
       }];
+      if (setting?.value) {
+        const zonesMap = new Map(zones.map((z) => [z.id, z.name]));
+        const fromName = active.from_zone_id ? zonesMap.get(active.from_zone_id) : null;
+        const toName = active.to_zone_id ? zonesMap.get(active.to_zone_id) : null;
+        out.push({
+          chatId: setting.value,
+          text: `🚕 طلب جديد #${active.id}
+📍 من: ${fromName ?? '—'}
+🏁 إلى: ${toName ?? '—'}
+💰 الأجرة: ${formatSYP(active.price ?? 0)}
+الزبون بينتظر — للقبول ردّ بكلمة «قبلت ${active.id}»`,
+        });
+      }
+      return out;
     }
 
     case 'CANCEL': {
@@ -165,8 +180,19 @@ async function handleGroup(
   if (!driver) return []; // غير مسجل بمجموعة السواقين — تجاهل
   if (intent !== 'DRIVER_ACCEPT' && intent !== 'DRIVER_DECLINE') return [];
 
-  const open = await repo.getOpenRideForGroup(env.DB, msg.chatId);
-  if (!open) return [{ chatId: msg.chatId, text: 'ما في طلب مفتوح هلق 👍' }];
+  // «قبلت 12» — قبول برقم محدد، أو «قبلت» لأحدث طلب منشور
+  const norm = normalizeArabic(msg.text);
+  const idMatch = norm.match(/قبلت\s*(#?)(\d{1,6})/);
+  let open: Ride | null = null;
+  if (idMatch) {
+    open = await repo.getRideById(env.DB, Number(idMatch[2]));
+    if (!open || open.status !== 'DISPATCHING') {
+      return [{ chatId: msg.chatId, text: `الطلب ${idMatch[2]} إما انمسح أو اناخد من قبل 🙏` }];
+    }
+  } else {
+    open = await repo.getOpenRideForGroup(env.DB, msg.chatId);
+    if (!open) return [{ chatId: msg.chatId, text: 'ما في طلب مفتوح هلق 👍' }];
+  }
 
   if (intent === 'DRIVER_DECLINE') return []; // صامت — ما داعي زحمة بالمجموعة
 
