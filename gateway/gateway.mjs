@@ -59,6 +59,13 @@ async function worker(path, method = 'GET', body = null) {
   return res.json();
 }
 
+// ─── LID mapping: واتساب الجديد بيخزن مفاتيح الجلسة على @lid — الإرسال لازم ينعمل عليه ───
+const lidMap = new Map(); // phone -> xxxxx@lid
+function resolveJid(chatId) {
+  const phone = chatId.split('@')[0];
+  return lidMap.get(phone) ?? chatId;
+}
+
 // ─── حالة البوابة (تُعرض على اللوحة) ───
 let sock = null;
 const state = {
@@ -165,6 +172,15 @@ async function startWhatsApp(pairPhone = null) {
       const senderJid = m.key.participant ?? chatId;
       const senderPhone = senderJid.split('@')[0].replace(/:/g, '');
 
+      // تعلّم LID: إذا الرسالة جاية بـ @lid أو فيها senderLid — احفظ رقم ↔ LID
+      if (chatId.endsWith('@lid')) {
+        const pn = m.key.senderPn ? String(m.key.senderPn).split('@')[0] : senderPhone;
+        if (/^\d+$/.test(pn)) lidMap.set(pn, chatId);
+      } else if (m.key.senderLid) {
+        const lid = String(m.key.senderLid).includes('@') ? String(m.key.senderLid) : `${m.key.senderLid}@lid`;
+        lidMap.set(senderPhone, lid);
+      }
+
       try {
         await worker('/webhook/whatsapp', 'POST', {
           chatId, senderPhone, text, isGroup: chatId.endsWith('@g.us'),
@@ -187,7 +203,7 @@ async function outboxLoop() {
           for (const m of messages) {
             try {
               // sendMessage بيرجّع رسالة واتساب الفعلية — التحقق منها يكشف الفشل الصامت
-              const resp = await sock.sendMessage(m.chat_id, { text: m.text });
+              const resp = await sock.sendMessage(resolveJid(m.chat_id), { text: m.text });
               if (!resp?.key?.id) throw new Error(`no message id returned (resp=${JSON.stringify(resp).slice(0, 120)})`);
               sent.push(m.id);
               log.info({ id: m.id, waId: resp.key.id, to: m.chat_id }, 'sent ok');

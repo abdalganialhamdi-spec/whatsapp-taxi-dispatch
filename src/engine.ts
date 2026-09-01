@@ -4,6 +4,7 @@
  */
 
 import { parseMessage } from './nlu.js';
+import { aiParse, matchZoneByName } from './ai.js';
 import { computeFare, formatSYP } from './pricing.js';
 import { assertTransition } from './ride-state.js';
 import * as repo from './repo.js';
@@ -37,7 +38,17 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
   const zones = await repo.getZones(env.DB);
   const driver = await repo.getDriverByPhone(env.DB, msg.senderPhone);
   const isDriver = !!driver;
-  const parsed = parseMessage(msg.text, zones, isDriver);
+  let parsed = parseMessage(msg.text, zones, isDriver);
+
+  // طبقة AI: تعمل فقط إذا المفتاح موجود + القواعدي ما فهم شي مفيد
+  if (!isDriver && (parsed.intent === 'UNKNOWN' || (!parsed.from_zone && !parsed.to_zone))) {
+    const ai = await aiParse(env, msg.text, zones);
+    if (ai && ai.intent !== 'UNKNOWN') {
+      const from = matchZoneByName(ai.from, zones);
+      const to = matchZoneByName(ai.to, zones);
+      parsed = { intent: ai.intent as typeof parsed.intent, from_zone: from, to_zone: to, raw: msg.text };
+    }
+  }
 
   // ─── رسائل مجموعة السواقين: فقط أوامر سواقين/قبول ───
   if (msg.isGroup) {

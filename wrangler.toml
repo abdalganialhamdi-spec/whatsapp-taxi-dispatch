@@ -6,6 +6,9 @@ compatibility_flags = ["nodejs_compat"]
 # لوحة الإدارة متاحة على /?key=ADMIN_KEY
 [vars]
 SERVICE_NAME = "whatsapp-taxi-dispatch"
+AI_BASE_URL = "https://api.z.ai/api/anthropic"
+AI_MODEL = "glm-4.6"
+AI_PROTOCOL = "anthropic"
 
 [[d1_databases]]
 binding = "DB"
@@ -14,3 +17,5 @@ database_id = "c4486bf4-b229-4d70-a90e-96c911f5f197"
 
 # SECRET: ADMIN_KEY — لا تضعه هنا أبداً
 #   npx wrangler secret put ADMIN_KEY
+# SECRET: AI_API_KEY
+#   npx wrangler secret put AI_API_KEY
