@@ -90,6 +90,9 @@ async function startWhatsApp(pairPhone = null) {
     logger: log.child({ module: 'baileys' }),
     markOnlineOnConnect: false,
     qrTimeout: 20_000,   // QR يتجدد كل 20 ثانية تلقائياً من واتساب
+    syncFullHistory: false,
+    shouldSyncHistoryMessage: () => false,  // لا تسحب تاريخ المحادثات — بيعطّل الاستقبال أحياناً
+    getMessage: async () => undefined,
   });
 
   sock.ev.on('creds.update', saveCreds);

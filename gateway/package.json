@@ -9,7 +9,7 @@
     "pair": "node gateway.mjs --pair"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0-rc.8",
+    "@whiskeysockets/baileys": "^6.7.9",
     "pino": "^9.4.0",
     "qrcode": "^1.5.4"
   }
