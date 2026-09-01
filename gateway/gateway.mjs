@@ -169,16 +169,24 @@ async function startWhatsApp(pairPhone = null) {
         '';
       if (!text.trim()) continue;
 
+      // المرسل: بالمجموعات participant، وبالخاص remoteJid
       const senderJid = m.key.participant ?? chatId;
-      const senderPhone = senderJid.split('@')[0].replace(/:/g, '');
 
-      // تعلّم LID: إذا الرسالة جاية بـ @lid أو فيها senderLid — احفظ رقم ↔ LID
-      if (chatId.endsWith('@lid')) {
-        const pn = m.key.senderPn ? String(m.key.senderPn).split('@')[0] : senderPhone;
-        if (/^\d+$/.test(pn)) lidMap.set(pn, chatId);
-      } else if (m.key.senderLid) {
+      // الرقم الحقيقي: senderPn يتفوق على LID (واتساب الجديد بيبعت المجموعات بـ @lid)
+      let senderPhone = senderJid.split('@')[0].replace(/:/g, '');
+      if (senderJid.endsWith('@lid') && m.key.senderPn) {
+        senderPhone = String(m.key.senderPn).split('@')[0].replace(/:/g, '');
+      }
+
+      // تعلّم LID: رقم ↔ JID، ليصير الإرسال دايماً على الصيغة اللي عندها مفاتيح الجلسة
+      const learnLid = (pn, jid) => {
+        if (pn && /^\d{8,15}$/.test(pn) && jid) lidMap.set(pn, jid);
+      };
+      if (chatId.endsWith('@lid')) learnLid(m.key.senderPn?.split('@')[0] ?? senderPhone, chatId);
+      if (senderJid.endsWith('@lid')) learnLid(senderPhone, senderJid);
+      if (m.key.senderLid) {
         const lid = String(m.key.senderLid).includes('@') ? String(m.key.senderLid) : `${m.key.senderLid}@lid`;
-        lidMap.set(senderPhone, lid);
+        learnLid(senderPhone, lid);
       }
 
       try {

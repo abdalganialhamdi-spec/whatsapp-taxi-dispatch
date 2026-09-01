@@ -177,7 +177,16 @@ async function handleGroup(
   driver: Driver | null,
   intent: ReturnType<typeof parseMessage>['intent']
 ): Promise<OutboundMessage[]> {
-  if (!driver) return []; // غير مسجل بمجموعة السواقين — تجاهل
+  if (!driver) {
+    // غير مسجل — إذا حاول يقبل نعلمه بدل التجاهل الصامت
+    if (intent === 'DRIVER_ACCEPT') {
+      return [{
+        chatId: msg.chatId,
+        text: `👨‍✈️ @${msg.senderPhone} لازم تنسجل أولاً — اكلم المهندس يسجلك بالنظام.`,
+      }];
+    }
+    return [];
+  }
   if (intent !== 'DRIVER_ACCEPT' && intent !== 'DRIVER_DECLINE') return [];
 
   // «قبلت 12» — قبول برقم محدد، أو «قبلت» لأحدث طلب منشور
