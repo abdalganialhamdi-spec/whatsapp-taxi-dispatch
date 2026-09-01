@@ -119,7 +119,7 @@ ${(rides ?? []).map((r: any) => `<tr>
 </table>
 
 <h2>السواقون</h2>
-<form class="bar" onsubmit="return addDriver(this)">
+<form class="bar" onsubmit="return addDriver(event, this)">
   <label>الاسم</label><input name="name" required style="width:120px">
   <label>التلفون</label><input name="phone" dir="ltr" required placeholder="9639XXXXXXXX" style="width:150px">
   <label>السيارة</label><input name="car" placeholder="كيا سيراتو" style="width:120px">
@@ -140,7 +140,7 @@ ${(drivers ?? []).map((d: any) => `<tr>
 </table>
 
 <h2>المناطق</h2>
-<form class="bar" onsubmit="return addZone(this)">
+<form class="bar" onsubmit="return addZone(event, this)">
   <label>الاسم</label><input name="name" required style="width:160px">
   <label>أسماء بديلة (فاصلة)</label><input name="aliases" placeholder="عند المخيم,المخيم القديم" style="width:220px">
   <label>الحزام</label>
@@ -159,7 +159,7 @@ ${(zones ?? []).map((z: any) => `<tr>
 </table>
 
 <h2>التعاريف اليدوية (تفوق الحساب دائماً)</h2>
-<form class="bar" onsubmit="return addFare(this)">
+<form class="bar" onsubmit="return addFare(event, this)">
   <label>من</label><select name="from_zone_id" required>${zoneOptions}</select>
   <label>إلى</label><select name="to_zone_id" required>${zoneOptions}</select>
   <label>الأجرة (ل.س)</label><input name="price" type="number" min="0" required style="width:120px">
@@ -184,20 +184,26 @@ const K = new URLSearchParams(location.search).get('key');
 const API = '/admin/api/';
 
 async function api(action, body) {
-  const r = await fetch(API + action + '?key=' + K, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) { alert('فشلت العملية: ' + (await r.text())); return false; }
-  location.reload();
-  return false;
+  try {
+    const r = await fetch(API + action + '?key=' + K, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { alert('فشلت العملية: ' + (await r.text())); return false; }
+    location.reload();
+    return false;
+  } catch (e) {
+    alert('خطأ شبكة: ' + e);
+    return false;
+  }
 }
 
 function cancelRide(id) {
   if (confirm('إلغاء الرحلة ' + id + '؟')) api('ride.cancel', { id });
 }
-function addDriver(f) {
+function addDriver(ev, f) {
+  ev.preventDefault();
   return api('driver.add', {
     name: f.name.value, phone: f.phone.value.replace(/[^0-9]/g, ''),
     car: f.car.value, plate: f.plate.value, commission_pct: +f.commission_pct.value,
@@ -205,12 +211,14 @@ function addDriver(f) {
 }
 function driverStatus(id, status) { api('driver.status', { id, status }); }
 function delDriver(id) { if (confirm('حذف السائق ' + id + '؟')) api('driver.del', { id }); }
-function addZone(f) {
+function addZone(ev, f) {
+  ev.preventDefault();
   return api('zone.add', { name: f.name.value, aliases: f.aliases.value.split(',').map(s => s.trim()).filter(Boolean), belt: +f.belt.value });
 }
 function zoneBelt(id, belt) { api('zone.belt', { id, belt }); }
 function delZone(id) { if (confirm('حذف المنطقة ' + id + '؟')) api('zone.del', { id }); }
-function addFare(f) {
+function addFare(ev, f) {
+  ev.preventDefault();
   return api('fare.add', { from_zone_id: +f.from_zone_id.value, to_zone_id: +f.to_zone_id.value, price: +f.price.value, note: f.note.value });
 }
 function editFare(id, from, to, oldPrice) {
