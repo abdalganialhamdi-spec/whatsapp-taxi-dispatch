@@ -5,10 +5,28 @@
 
 import { todayStats } from './repo.js';
 import { formatSYP } from './pricing.js';
+import { whatsappTabHtml } from './whatsapp-tab.js';
 import type { Env } from './types.js';
+
+const GATEWAY_URL = 'https://almaih.cloud/g';
+
+/** حالة البوابة من خادم البوت (QR/كود اقتران) — null إذا غير متاح */
+async function gatewayStatus(adminKey: string): Promise<Record<string, any> | null> {
+  try {
+    const res = await fetch(`${GATEWAY_URL}/status`, {
+      headers: { 'x-gateway-token': adminKey },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as Record<string, any>;
+  } catch {
+    return null;
+  }
+}
 
 export async function adminPage(env: Env): Promise<Response> {
   const stats = await todayStats(env.DB);
+  const gw = await gatewayStatus(env.ADMIN_KEY);
   const { results: drivers } = await env.DB.prepare(
     `SELECT id, name, phone, car, plate, status, commission_pct FROM drivers WHERE active = 1 ORDER BY id`
   ).all();
@@ -68,6 +86,15 @@ export async function adminPage(env: Env): Promise<Response> {
 </div>
 
 <main>
+${whatsappTabHtml({
+  connection: gw?.connection ?? 'closed',
+  user: gw?.user ?? null,
+  qr: gw?.qr ?? null,
+  pairingCode: gw?.pairingCode ?? null,
+  pairingExpiresInSec: gw?.pairingExpiresInSec ?? null,
+  lastError: gw?.lastError ?? (gw === null ? 'البوابة غير متاحة — شغّل gateway.mjs على السيرفر' : null),
+})}
+
 <h2>آخر الرحلات</h2>
 <table><tr><th>#</th><th>الزبون</th><th>من</th><th>إلى</th><th>السائق</th><th>الأجرة</th><th>الحالة</th><th>التاريخ</th></tr>
 ${(rides ?? []).map((r: any) => `<tr>

@@ -6,21 +6,21 @@
  * الوظيفة:
  *  1) تستقبل رسائل واتساب (Baileys) وتدفعها للـ Worker على /webhook/whatsapp
  *  2) تسحب الردود من /outbox/pending وترسلها وتؤكد /outbox/ack
+ *  3) تدير الاقتران: QR أو كود اقتران (Pairing Code) — عبر HTTP API للوحة
  *
- * التشغيل على سيرفر عادي (VPS) — ليس على Workers.
+ * ⚠️ القاعدة الذهبية: الاقتران (QR أو كود) يتم من هذا السيرفر — لكن الاتصال
+ *    بواتساب يبقى من هذا الـ IP؛ إذا انحظر الجلسة يُعاد الاقتران من هنا مباشرة.
+ *    (ملاحظة: الاقتران من IP منزلي أأمن — اختياري حسب سياستك)
  *
- * ⚠️ القاعدة الذهبية للاقتران: اعمل QR-pair من متصفح/IP **منزلي** وليس من IP
- *    مركزي/سيرفر — تقليل خطر الحظر بشكل كبير. الجلسة تُحفظ بـ ./session
- *
- * الاستخدام:
- *   WORKER_URL=https://xxx.workers.dev ADMIN_KEY=... node gateway.mjs
- *   WORKER_URL=... ADMIN_KEY=... node gateway.mjs --pair   # إعادة اقتران QR
+ * التشغيل:
+ *   WORKER_URL=https://xxx.workers.dev ADMIN_KEY=... GATEWAY_TOKEN=... node gateway.mjs
  */
 
 import { createRequire } from 'node:module';
 import { mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:http';
 import { pino } from 'pino';
 import QRCode from 'qrcode';
 
@@ -35,9 +35,10 @@ const {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ─── الإعدادات ───
-const WORKER_URL = process.env.WORKER_URL ?? 'http://localhost:8787';
+const WORKER_URL = process.env.WORKER_URL ?? 'https://whatsapp-taxi-dispatch.abdalganih2.workers.dev';
 const ADMIN_KEY = process.env.ADMIN_KEY ?? '';
-const PORT = Number(process.env.PORT ?? 3010);
+const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN ?? ADMIN_KEY; // لوحة ← بوابة
+const HTTP_PORT = Number(process.env.GATEWAY_PORT ?? 3010);
 const POLL_MS = Number(process.env.POLL_MS ?? 1500);
 const SESSION_DIR = process.env.SESSION_DIR ?? join(__dirname, 'session');
 
@@ -47,10 +48,8 @@ if (!ADMIN_KEY) {
 }
 
 mkdirSync(SESSION_DIR, { recursive: true });
-
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' });
 
-// ─── إرسال للـ Worker ───
 async function worker(path, method = 'GET', body = null) {
   const res = await fetch(`${WORKER_URL}${path}`, {
     method,
@@ -61,40 +60,85 @@ async function worker(path, method = 'GET', body = null) {
   return res.json();
 }
 
-// ─── حالة الاتصال ───
+// ─── حالة البوابة (تُعرض على اللوحة) ───
 let sock = null;
+const state = {
+  connection: 'initializing',   // initializing | waiting_scan | connected | closed
+  qr: null,                     // data URL لآخر QR صالح
+  qrAt: null,
+  pairingCode: null,            // كود الاقتران الحالي
+  pairingPhone: null,
+  pairingExpiresAt: null,
+  user: null,                   // JID المتصل
+  lastError: null,
+};
 
-async function startWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+async function startWhatsApp(pairPhone = null) {
+  const { state: auth, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
   const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
     version,
-    auth: state,
+    auth: auth,
     printQRInTerminal: false,
     logger: log.child({ module: 'baileys' }),
-    markOnlineOnConnect: false, // لا نظهر "متصل" دائماً — طبيعي أكثر
+    markOnlineOnConnect: false,
   });
 
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (u) => {
     const { connection, lastDisconnect, qr } = u;
-    if (qr) {
-      const svg = await QRCode.toString(qr, { type: 'terminal', small: true });
-      console.log('\n📱 امسح الكود: واتساب ← الأجهزة المرتبطة ← ربط جهاز');
-      console.log('⚠️  القاعدة الذهبية: اقتران من IP منزلي، مش من سيرفر!\n');
-      console.log(svg);
+
+    if (qr && !pairPhone) {
+      state.connection = 'waiting_scan';
+      state.qr = await QRCode.toDataURL(qr, { margin: 1, width: 320 });
+      state.qrAt = Date.now();
+      console.log('📱 QR جديد جاهز — امسحه من: الأجهزة المرتبطة ← ربط جهاز');
     }
+
+    // كود الاقتران: يُطلب مرة واحدة بعد جهوزية الاتصال الأولية (قبل الـ QR)
+    if (pairPhone && !state.pairingCode && !state.pairingRequested) {
+      state.pairingRequested = true;
+      // ننتظر لحظة حتى تستقر القناة ثم نطلب الكود
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(pairPhone);
+          state.pairingCode = code;
+          state.pairingPhone = pairPhone;
+          state.pairingExpiresAt = Date.now() + 120_000;
+          state.connection = 'waiting_scan';
+          console.log(`🔢 كود الاقتران لرقم ${pairPhone}: ${code}`);
+        } catch (e) {
+          state.lastError = `pairing code: ${String(e)}`;
+          state.pairingRequested = false;
+          console.error('❌ طلب كود اقتران فشل:', String(e));
+        }
+      }, 3000);
+    }
+
     if (connection === 'open') {
-      console.log('✅ واتساب متصل');
+      state.connection = 'connected';
+      state.qr = null;
+      state.pairingCode = null;
+      state.user = sock.user?.id ?? null;
+      console.log('✅ واتساب متصل:', state.user);
     }
+    if (connection === 'connecting') state.connection = 'connecting';
     if (connection === 'close') {
+      state.user = null;
       const code = lastDisconnect?.error?.output?.statusCode;
-      const rejoin = code !== DisconnectReason.loggedOut;
-      console.log(`⚠️ انقطع الاتصال (code=${code}) — ${rejoin ? 'إعادة محاولة…' : 'خروج نهائي، امسح session واقتران من جديد'}`);
-      if (rejoin) setTimeout(startWhatsApp, 3000);
-      else process.exit(2);
+      const loggedOut = code === DisconnectReason.loggedOut;
+      state.connection = loggedOut ? 'closed' : 'reconnecting';
+      state.lastError = `disconnect code=${code}`;
+      console.log(`⚠️ انقطع (code=${code}) — ${loggedOut ? 'مسح الجلسة وإعادة اقتران' : 'إعادة محاولة…'}`);
+      if (loggedOut) {
+        // جلسة فسدت — امسحها وانتظر اقتراناً جديداً من اللوحة
+        sock = null;
+        state.connection = 'closed';
+      } else {
+        setTimeout(() => startWhatsApp(), 3000);
+      }
     }
   });
 
@@ -102,7 +146,7 @@ async function startWhatsApp() {
     if (type !== 'notify') return;
     for (const m of messages) {
       if (!m.message) continue;
-      if (m.key.fromMe) continue; // رسائلنا الصادرة لا نعيد معالجتها
+      if (m.key.fromMe) continue;
       const chatId = m.key.remoteJid;
       if (!chatId || chatId === 'status@broadcast') continue;
 
@@ -113,15 +157,12 @@ async function startWhatsApp() {
         '';
       if (!text.trim()) continue;
 
-      const senderJid = m.key.participant ?? chatId; // بالمجموعات: مين أرسل
+      const senderJid = m.key.participant ?? chatId;
       const senderPhone = senderJid.split('@')[0].replace(/:/g, '');
 
       try {
         await worker('/webhook/whatsapp', 'POST', {
-          chatId,
-          senderPhone,
-          text,
-          isGroup: chatId.endsWith('@g.us'),
+          chatId, senderPhone, text, isGroup: chatId.endsWith('@g.us'),
         });
       } catch (e) {
         log.error({ err: String(e), chatId }, 'webhook failed');
@@ -134,18 +175,20 @@ async function startWhatsApp() {
 async function outboxLoop() {
   for (;;) {
     try {
-      const { messages } = await worker('/outbox/pending');
-      if (messages?.length && sock) {
-        const sent = [];
-        for (const m of messages) {
-          try {
-            await sock.sendMessage(m.chat_id, { text: m.text });
-            sent.push(m.id);
-          } catch (e) {
-            log.error({ err: String(e), id: m.id }, 'send failed');
+      if (sock && state.connection === 'connected') {
+        const { messages } = await worker('/outbox/pending');
+        if (messages?.length) {
+          const sent = [];
+          for (const m of messages) {
+            try {
+              await sock.sendMessage(m.chat_id, { text: m.text });
+              sent.push(m.id);
+            } catch (e) {
+              log.error({ err: String(e), id: m.id }, 'send failed');
+            }
           }
+          if (sent.length) await worker('/outbox/ack', 'POST', { ids: sent });
         }
-        if (sent.length) await worker('/outbox/ack', 'POST', { ids: sent });
       }
     } catch (e) {
       log.warn({ err: String(e) }, 'outbox poll failed');
@@ -154,16 +197,97 @@ async function outboxLoop() {
   }
 }
 
-// HTTP صحي بسيط (node:http)
-import { createServer } from 'node:http';
-createServer((req, res) => {
-  res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ ok: !!sock?.user, user: sock?.user?.id ?? null }));
-}).listen(PORT, () => console.log(`💚 health: http://localhost:${PORT}/`));
+// ─── HTTP API للوحة الإدارة ───
+// الأمان: GATEWAY_TOKEN (يساوي ADMIN_KEY الافتراضياً) — اللوحة بتبعته بـ ?token=
+function checkToken(req, url) {
+  // التوكن ممكن يوصل هيدر (للوحة) أو query ?token= (لأزرار الجافاسكربت)
+  const header = req.headers['x-gateway-token'];
+  const query = url.searchParams.get('token');
+  const t = header || query || '';
+  return t === GATEWAY_TOKEN;
+}
 
-// ─── تشغيل ───
+const server = createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  res.setHeader('content-type', 'application/json');
+
+  if (!checkToken(req, url)) {
+    res.writeHead(401); res.end(JSON.stringify({ error: 'token غلط' })); return;
+  }
+
+  try {
+    // حالة الاتصال + QR الحالي (data URL)
+    if (url.pathname === '/status') {
+      res.writeHead(200);
+      res.end(JSON.stringify({
+        connection: state.connection,
+        user: state.user,
+        qr: state.qr,
+        qrAgeSec: state.qrAt ? Math.floor((Date.now() - state.qrAt) / 1000) : null,
+        pairingCode: state.pairingCode,
+        pairingPhone: state.pairingPhone,
+        pairingExpiresInSec: state.pairingExpiresAt ? Math.max(0, Math.floor((state.pairingExpiresAt - Date.now()) / 1000)) : null,
+        lastError: state.lastError,
+      }));
+      return;
+    }
+
+    // بدء اقتران QR جديد (يمسح الجلسة القديمة)
+    if (url.pathname === '/pair/qr' && req.method === 'POST') {
+      if (sock) { try { sock.end(); } catch {} sock = null; }
+      const fs = await import('node:fs');
+      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+      mkdirSync(SESSION_DIR, { recursive: true });
+      state.qr = null; state.pairingCode = null; state.connection = 'initializing';
+      await startWhatsApp();
+      res.writeHead(200); res.end(JSON.stringify({ ok: true, mode: 'qr' }));
+      return;
+    }
+
+    // بدء اقتران بكود لرقم معين
+    if (url.pathname === '/pair/code' && req.method === 'POST') {
+      const body = await new Promise((resolve) => {
+        let d = ''; req.on('data', (c) => (d += c)); req.on('end', () => resolve(JSON.parse(d || '{}')));
+      });
+      const phone = String(body.phone ?? '').replace(/[^0-9]/g, '');
+      if (!/^9\d{8,14}$/.test(phone)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'رقم غير صالح — لازم دولي بدون + مثال: 963958794195' }));
+        return;
+      }
+      if (sock) { try { sock.end(); } catch {} sock = null; }
+      const fs = await import('node:fs');
+      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+      mkdirSync(SESSION_DIR, { recursive: true });
+      state.qr = null; state.pairingCode = null; state.pairingRequested = false; state.connection = 'initializing';
+      await startWhatsApp(phone);
+      res.writeHead(200); res.end(JSON.stringify({ ok: true, mode: 'code', phone }));
+      return;
+    }
+
+    // قطع الاتصال
+    if (url.pathname === '/logout' && req.method === 'POST') {
+      try { await sock?.logout(); } catch {}
+      const fs = await import('node:fs');
+      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+      mkdirSync(SESSION_DIR, { recursive: true });
+      sock = null; state.connection = 'closed'; state.user = null;
+      res.writeHead(200); res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    res.writeHead(404); res.end(JSON.stringify({ error: 'not found' }));
+  } catch (e) {
+    res.writeHead(500); res.end(JSON.stringify({ error: String(e) }));
+  }
+});
+
+server.listen(HTTP_PORT, '127.0.0.1', () => {
+  console.log(`🚕 بوابة تكسي — HTTP: http://127.0.0.1:${HTTP_PORT}`);
+  console.log(`🔑 GATEWAY_TOKEN: ${GATEWAY_TOKEN}`);
+});
+
 console.log(`🚕 بوابة تكسي واتساب → ${WORKER_URL}`);
 console.log(`📂 الجلسة: ${SESSION_DIR}`);
-
 await startWhatsApp();
 outboxLoop();
