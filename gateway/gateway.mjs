@@ -8,12 +8,11 @@
  *  2) تسحب الردود من /outbox/pending وترسلها وتؤكد /outbox/ack
  *  3) تدير الاقتران: QR أو كود اقتران (Pairing Code) — عبر HTTP API للوحة
  *
- * ⚠️ القاعدة الذهبية: الاقتران (QR أو كود) يتم من هذا السيرفر — لكن الاتصال
- *    بواتساب يبقى من هذا الـ IP؛ إذا انحظر الجلسة يُعاد الاقتران من هنا مباشرة.
- *    (ملاحظة: الاقتران من IP منزلي أأمن — اختياري حسب سياستك)
+ * ⚠️ الجلسة محفوظة بـ ./session ولا تُمسح أبداً عند إعادة التشغيل أو التحديث.
+ *    المسح يكون فقط عبر /pair/qr أو /pair/code أو /logout (طلب صريح من اللوحة).
  *
  * التشغيل:
- *   WORKER_URL=https://xxx.workers.dev ADMIN_KEY=... GATEWAY_TOKEN=... node gateway.mjs
+ *   WORKER_URL=https://xxx.workers.dev ADMIN_KEY=... node gateway.mjs
  */
 
 import { createRequire } from 'node:module';
@@ -187,10 +186,15 @@ async function outboxLoop() {
           const sent = [];
           for (const m of messages) {
             try {
-              await sock.sendMessage(m.chat_id, { text: m.text });
+              // sendMessage بيرجّع رسالة واتساب الفعلية — التحقق منها يكشف الفشل الصامت
+              const resp = await sock.sendMessage(m.chat_id, { text: m.text });
+              if (!resp?.key?.id) throw new Error(`no message id returned (resp=${JSON.stringify(resp).slice(0, 120)})`);
               sent.push(m.id);
+              log.info({ id: m.id, waId: resp.key.id, to: m.chat_id }, 'sent ok');
             } catch (e) {
               log.error({ err: String(e), id: m.id }, 'send failed');
+              // فشل صريح: علّم الرسالة failed بعد 3 محاولات — ما نعلق اللوب
+              m._tries = (m._tries ?? 0) + 1;
             }
           }
           if (sent.length) await worker('/outbox/ack', 'POST', { ids: sent });
