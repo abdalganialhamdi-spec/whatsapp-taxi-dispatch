@@ -93,6 +93,7 @@ async function startWhatsApp(pairPhone = null) {
     syncFullHistory: false,
     shouldSyncHistoryMessage: () => false,  // لا تسحب تاريخ المحادثات — بيعطّل الاستقبال أحياناً
     getMessage: async () => undefined,
+    browser: ['Windows', 'Chrome', '22.4.5'],  // بصمة Windows — Ubuntu مرفوضة أحياناً بالمصافحة
   });
 
   sock.ev.on('creds.update', saveCreds);
