@@ -1,6 +1,6 @@
 /**
- * لوحة الإدارة — عربية RTL، بلا أي framework (HTML واحد جاهز من الـ Worker).
- * التبويبات: اليوم | الرحلات | السواقين | المناطق والتعاريف
+ * لوحة الإدارة — عربية RTL، صفحة واحدة بتبويبات: واتساب | اليوم | الرحلات | السواقين | المناطق والتعاريف
+ * كل العمليات: إضافة/تعديل/حذف/إلغاء رحلة — بلا أي framework.
  */
 
 import { todayStats } from './repo.js';
@@ -41,12 +41,16 @@ export async function adminPage(env: Env): Promise<Response> {
   ).all();
   const { results: zones } = await env.DB.prepare(`SELECT id, name, belt FROM zones ORDER BY belt, id`).all();
   const { results: fares } = await env.DB.prepare(
-    `SELECT f.id, f.price, f.note, fz.name AS from_name, tz.name AS to_name
+    `SELECT f.id, f.price, f.note, f.from_zone_id, f.to_zone_id, fz.name AS from_name, tz.name AS to_name
      FROM fixed_fares f
      JOIN zones fz ON fz.id = f.from_zone_id
      JOIN zones tz ON tz.id = f.to_zone_id
      ORDER BY f.id`
   ).all();
+
+  const zoneOptions = (zones ?? [])
+    .map((z: any) => `<option value="${z.id}">${z.name} (حزام ${z.belt})</option>`)
+    .join('');
 
   const html = `<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -55,7 +59,7 @@ export async function adminPage(env: Env): Promise<Response> {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>مشاوير الحموي — لوحة الإدارة</title>
 <style>
-  :root { --bg:#f6f4ef; --card:#fff; --ink:#2d2a24; --accent:#0e7c66; --line:#e4ded2; }
+  :root { --bg:#f6f4ef; --card:#fff; --ink:#2d2a24; --accent:#0e7c66; --line:#e4ded2; --danger:#c0392b; }
   * { box-sizing:border-box; font-family:'Segoe UI', Tahoma, 'Noto Naskh Arabic', sans-serif; }
   body { margin:0; background:var(--bg); color:var(--ink); }
   header { background:var(--accent); color:#fff; padding:16px 20px; }
@@ -63,7 +67,7 @@ export async function adminPage(env: Env): Promise<Response> {
   .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; padding:16px 20px; }
   .stat { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; text-align:center; }
   .stat .n { font-size:26px; font-weight:700; color:var(--accent); }
-  main { padding:0 20px 40px; }
+  main { padding:0 20px 40px; max-width:1100px; margin:0 auto; }
   h2 { font-size:17px; margin:26px 0 10px; border-bottom:2px solid var(--line); padding-bottom:6px; }
   table { width:100%; border-collapse:collapse; background:var(--card); border-radius:12px; overflow:hidden; font-size:14px; }
   th, td { padding:10px 12px; text-align:right; border-bottom:1px solid var(--line); }
@@ -72,7 +76,14 @@ export async function adminPage(env: Env): Promise<Response> {
   .st.NEW{background:#fff3cd} .st.DISPATCHING{background:#d1ecf1} .st.ASSIGNED{background:#d4edda}
   .st.ARRIVED{background:#e2d5f1} .st.IN_RIDE{background:#fde2c8} .st.DONE{background:#c9e7d3} .st.CANCELLED{background:#f5d0d0}
   .pill { display:inline-block; padding:2px 10px; border-radius:99px; background:#e8f5f1; color:var(--accent); font-size:12px; margin-inline-end:6px; }
+  button { cursor:pointer; border:0; border-radius:8px; padding:8px 14px; font-size:14px; background:var(--accent); color:#fff; }
+  button.danger { background:var(--danger); }
+  button.small { padding:4px 10px; font-size:12px; }
+  input, select { border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:14px; }
+  form.bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; margin-bottom:12px; }
+  form.bar label { font-size:13px; color:#6b6558; }
   footer { color:#8a8578; font-size:12px; text-align:center; padding:20px; }
+  .muted { color:#8a8578; font-size:13px; }
 </style>
 </head>
 <body>
@@ -96,65 +107,195 @@ ${whatsappTabHtml({
 })}
 
 <h2>آخر الرحلات</h2>
-<table><tr><th>#</th><th>الزبون</th><th>من</th><th>إلى</th><th>السائق</th><th>الأجرة</th><th>الحالة</th><th>التاريخ</th></tr>
+<table>
+<tr><th>#</th><th>الزبون</th><th>من</th><th>إلى</th><th>السائق</th><th>الأجرة</th><th>الحالة</th><th>التاريخ</th><th></th></tr>
 ${(rides ?? []).map((r: any) => `<tr>
-  <td>${r.id}</td><td>${r.client_phone}</td><td>${r.from_name ?? '—'}</td><td>${r.to_name ?? '—'}</td>
+  <td>${r.id}</td><td dir="ltr">${r.client_phone}</td><td>${r.from_name ?? '—'}</td><td>${r.to_name ?? '—'}</td>
   <td>${r.driver_name ?? '—'}</td><td>${r.price ? formatSYP(r.price) : '—'}</td>
   <td><span class="st ${r.status}">${r.status}</span></td><td>${(r.created_at ?? '').slice(0, 16)}</td>
+  <td>${['NEW','DISPATCHING','ASSIGNED','ARRIVED','IN_RIDE'].includes(r.status)
+    ? `<button class="small danger" onclick="cancelRide(${r.id})">إلغاء</button>` : ''}</td>
 </tr>`).join('')}
 </table>
 
 <h2>السواقون</h2>
-<table><tr><th>#</th><th>الاسم</th><th>التلفون</th><th>السيارة</th><th>اللوحة</th><th>العمولة</th><th>الحالة</th></tr>
+<form class="bar" onsubmit="return addDriver(this)">
+  <label>الاسم</label><input name="name" required style="width:120px">
+  <label>التلفون</label><input name="phone" dir="ltr" required placeholder="9639XXXXXXXX" style="width:150px">
+  <label>السيارة</label><input name="car" placeholder="كيا سيراتو" style="width:120px">
+  <label>اللوحة</label><input name="plate" style="width:100px">
+  <label>العمولة %</label><input name="commission_pct" type="number" value="10" min="0" max="50" style="width:70px">
+  <button>➕ إضافة سائق</button>
+</form>
+<table>
+<tr><th>#</th><th>الاسم</th><th>التلفون</th><th>السيارة</th><th>اللوحة</th><th>العمولة</th><th>الحالة</th><th></th></tr>
 ${(drivers ?? []).map((d: any) => `<tr>
   <td>${d.id}</td><td>${d.name}</td><td dir="ltr">+${d.phone}</td><td>${d.car}</td><td>${d.plate}</td>
   <td>${d.commission_pct}%</td><td><span class="pill">${d.status}</span></td>
+  <td>
+    <button class="small" onclick="driverStatus(${d.id},'${d.status === 'AVAILABLE' ? 'OFFLINE' : 'AVAILABLE'}')">${d.status === 'AVAILABLE' ? 'إيقاف' : 'تشغيل'}</button>
+    <button class="small danger" onclick="delDriver(${d.id})">حذف</button>
+  </td>
 </tr>`).join('')}
 </table>
 
 <h2>المناطق</h2>
-<table><tr><th>#</th><th>الاسم</th><th>الحزام</th></tr>
-${(zones ?? []).map((z: any) => `<tr><td>${z.id}</td><td>${z.name}</td><td>حزام ${z.belt}</td></tr>`).join('')}
+<form class="bar" onsubmit="return addZone(this)">
+  <label>الاسم</label><input name="name" required style="width:160px">
+  <label>أسماء بديلة (فاصلة)</label><input name="aliases" placeholder="عند المخيم,المخيم القديم" style="width:220px">
+  <label>الحزام</label>
+  <select name="belt"><option value="1">1 — مدينة</option><option value="2">2 — ضواحي</option><option value="3">3 — ريف</option></select>
+  <button>➕ إضافة منطقة</button>
+</form>
+<table>
+<tr><th>#</th><th>الاسم</th><th>الحزام</th><th></th></tr>
+${(zones ?? []).map((z: any) => `<tr>
+  <td>${z.id}</td><td>${z.name}</td><td>حزام ${z.belt}</td>
+  <td>
+    <button class="small" onclick="zoneBelt(${z.id},${z.belt >= 3 ? 1 : z.belt + 1})">حزام → ${z.belt >= 3 ? 1 : z.belt + 1}</button>
+    <button class="small danger" onclick="delZone(${z.id})">حذف</button>
+  </td>
+</tr>`).join('')}
 </table>
 
-<h2>التعاريف اليدوية</h2>
-<table><tr><th>من</th><th>إلى</th><th>الأجرة</th><th>ملاحظة</th></tr>
-${(fares ?? []).map((f: any) => `<tr><td>${f.from_name}</td><td>${f.to_name}</td><td>${formatSYP(f.price)}</td><td>${f.note ?? ''}</td></tr>`).join('')}
+<h2>التعاريف اليدوية (تفوق الحساب دائماً)</h2>
+<form class="bar" onsubmit="return addFare(this)">
+  <label>من</label><select name="from_zone_id" required>${zoneOptions}</select>
+  <label>إلى</label><select name="to_zone_id" required>${zoneOptions}</select>
+  <label>الأجرة (ل.س)</label><input name="price" type="number" min="0" required style="width:120px">
+  <label>ملاحظة</label><input name="note" placeholder="تعرفة معتمدة" style="width:140px">
+  <button>➕ إضافة تعرفة</button>
+</form>
+<table>
+<tr><th>من</th><th>إلى</th><th>الأجرة</th><th>ملاحظة</th><th></th></tr>
+${(fares ?? []).map((f: any) => `<tr>
+  <td>${f.from_name}</td><td>${f.to_name}</td><td>${formatSYP(f.price)}</td><td>${f.note ?? ''}</td>
+  <td>
+    <button class="small" onclick="editFare(${f.id}, ${f.from_zone_id}, ${f.to_zone_id}, ${f.price})">تعديل السعر</button>
+    <button class="small danger" onclick="delFare(${f.id})">حذف</button>
+  </td>
+</tr>`).join('')}
 </table>
 </main>
 <footer>whatsapp-taxi-dispatch — مبني بالـ AI ☁️ Cloudflare Workers + D1</footer>
+
+<script>
+const K = new URLSearchParams(location.search).get('key');
+const API = '/admin/api/';
+
+async function api(action, body) {
+  const r = await fetch(API + action + '?key=' + K, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) { alert('فشلت العملية: ' + (await r.text())); return false; }
+  location.reload();
+  return false;
+}
+
+function cancelRide(id) {
+  if (confirm('إلغاء الرحلة ' + id + '؟')) api('ride.cancel', { id });
+}
+function addDriver(f) {
+  return api('driver.add', {
+    name: f.name.value, phone: f.phone.value.replace(/[^0-9]/g, ''),
+    car: f.car.value, plate: f.plate.value, commission_pct: +f.commission_pct.value,
+  });
+}
+function driverStatus(id, status) { api('driver.status', { id, status }); }
+function delDriver(id) { if (confirm('حذف السائق ' + id + '؟')) api('driver.del', { id }); }
+function addZone(f) {
+  return api('zone.add', { name: f.name.value, aliases: f.aliases.value.split(',').map(s => s.trim()).filter(Boolean), belt: +f.belt.value });
+}
+function zoneBelt(id, belt) { api('zone.belt', { id, belt }); }
+function delZone(id) { if (confirm('حذف المنطقة ' + id + '؟')) api('zone.del', { id }); }
+function addFare(f) {
+  return api('fare.add', { from_zone_id: +f.from_zone_id.value, to_zone_id: +f.to_zone_id.value, price: +f.price.value, note: f.note.value });
+}
+function editFare(id, from, to, oldPrice) {
+  const p = prompt('السعر الجديد (ل.س):', oldPrice);
+  if (p) api('fare.edit', { id, price: +p });
+}
+function delFare(id) { if (confirm('حذف التعرفة ' + id + '؟')) api('fare.del', { id }); }
+</script>
 </body></html>`;
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
 
-/** واجهة API إدارية (إضافة سواق/تعرفة مستقبلاً) */
+/** واجهة API إدارية كاملة CRUD */
 export async function adminApi(request: Request, env: Env, action: string): Promise<Response> {
   if (request.method !== 'POST') return new Response('POST فقط', { status: 405 });
   const body = await request.json<Record<string, any>>();
-  switch (action) {
-    case 'driver.add': {
-      await env.DB.prepare(
-        `INSERT INTO drivers (phone, name, car, plate, commission_pct, group_jid) VALUES (?, ?, ?, ?, ?, ?)`
-      )
-        .bind(String(body.phone), String(body.name), String(body.car ?? ''), String(body.plate ?? ''), Number(body.commission_pct ?? 10), String(body.group_jid ?? ''))
-        .run();
-      return Response.json({ ok: true });
+  try {
+    switch (action) {
+      // ─── سواقين ───
+      case 'driver.add': {
+        await env.DB.prepare(
+          `INSERT INTO drivers (phone, name, car, plate, commission_pct, group_jid) VALUES (?, ?, ?, ?, ?, ?)`
+        )
+          .bind(String(body.phone), String(body.name), String(body.car ?? ''), String(body.plate ?? ''), Number(body.commission_pct ?? 10), String(body.group_jid ?? ''))
+          .run();
+        return Response.json({ ok: true });
+      }
+      case 'driver.status': {
+        await env.DB.prepare(`UPDATE drivers SET status = ? WHERE id = ?`).bind(String(body.status), Number(body.id)).run();
+        return Response.json({ ok: true });
+      }
+      case 'driver.del': {
+        await env.DB.prepare(`UPDATE drivers SET active = 0 WHERE id = ?`).bind(Number(body.id)).run();
+        return Response.json({ ok: true });
+      }
+
+      // ─── مناطق ───
+      case 'zone.add': {
+        await env.DB.prepare(`INSERT INTO zones (name, aliases, belt) VALUES (?, ?, ?)`)
+          .bind(String(body.name), JSON.stringify(body.aliases ?? []), Number(body.belt ?? 1))
+          .run();
+        return Response.json({ ok: true });
+      }
+      case 'zone.belt': {
+        await env.DB.prepare(`UPDATE zones SET belt = ? WHERE id = ?`).bind(Number(body.belt), Number(body.id)).run();
+        return Response.json({ ok: true });
+      }
+      case 'zone.del': {
+        await env.DB.prepare(`DELETE FROM zones WHERE id = ?`).bind(Number(body.id)).run();
+        return Response.json({ ok: true });
+      }
+
+      // ─── تعاريف ───
+      case 'fare.add': {
+        await env.DB.prepare(
+          `INSERT INTO fixed_fares (from_zone_id, to_zone_id, price, note) VALUES (?, ?, ?, ?)`
+        )
+          .bind(Number(body.from_zone_id), Number(body.to_zone_id), Number(body.price), String(body.note ?? ''))
+          .run();
+        return Response.json({ ok: true });
+      }
+      case 'fare.edit': {
+        await env.DB.prepare(`UPDATE fixed_fares SET price = ? WHERE id = ?`).bind(Number(body.price), Number(body.id)).run();
+        return Response.json({ ok: true });
+      }
+      case 'fare.del': {
+        await env.DB.prepare(`DELETE FROM fixed_fares WHERE id = ?`).bind(Number(body.id)).run();
+        return Response.json({ ok: true });
+      }
+
+      // ─── رحلات ───
+      case 'ride.cancel': {
+        const ride = await env.DB.prepare(`SELECT status FROM rides WHERE id = ?`).bind(Number(body.id)).first<{ status: string }>();
+        if (!ride) return Response.json({ error: 'الرحلة غير موجودة' }, { status: 404 });
+        if (!['NEW', 'DISPATCHING', 'ASSIGNED', 'ARRIVED', 'IN_RIDE'].includes(ride.status)) {
+          return Response.json({ error: 'الرحلة مقفلة — ما تنلغى' }, { status: 400 });
+        }
+        await env.DB.prepare(`UPDATE rides SET status = 'CANCELLED' WHERE id = ?`).bind(Number(body.id)).run();
+        return Response.json({ ok: true });
+      }
+
+      default:
+        return Response.json({ error: 'unknown action: ' + action }, { status: 404 });
     }
-    case 'fare.add': {
-      await env.DB.prepare(
-        `INSERT INTO fixed_fares (from_zone_id, to_zone_id, price, note) VALUES (?, ?, ?, ?)`
-      )
-        .bind(Number(body.from_zone_id), Number(body.to_zone_id), Number(body.price), String(body.note ?? ''))
-        .run();
-      return Response.json({ ok: true });
-    }
-    case 'zone.add': {
-      await env.DB.prepare(`INSERT INTO zones (name, aliases, belt) VALUES (?, ?, ?)`)
-        .bind(String(body.name), JSON.stringify(body.aliases ?? []), Number(body.belt ?? 1))
-        .run();
-      return Response.json({ ok: true });
-    }
-    default:
-      return Response.json({ error: 'unknown action' }, { status: 404 });
+  } catch (e) {
+    return Response.json({ error: String(e) }, { status: 500 });
   }
 }
