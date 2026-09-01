@@ -29,6 +29,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  makeCacheableSignalKeyStore,
 } = require('@whiskeysockets/baileys');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -85,7 +86,11 @@ async function startWhatsApp(pairPhone = null) {
 
   sock = makeWASocket({
     version,
-    auth: auth,
+    auth: {
+      creds: auth.creds,
+      // ⚠️ حاسم للاقتران: بدون Cacheable store المفاتيح بتتلف أثناء المصافحة → Invalid account signature
+      keys: makeCacheableSignalKeyStore(auth.keys, log.child({ module: 'signal-keys' })),
+    },
     printQRInTerminal: false,
     logger: log.child({ module: 'baileys' }),
     markOnlineOnConnect: false,
@@ -93,7 +98,7 @@ async function startWhatsApp(pairPhone = null) {
     syncFullHistory: false,
     shouldSyncHistoryMessage: () => false,  // لا تسحب تاريخ المحادثات — بيعطّل الاستقبال أحياناً
     getMessage: async () => undefined,
-    browser: ['Windows', 'Chrome', '22.4.5'],  // بصمة Windows — Ubuntu مرفوضة أحياناً بالمصافحة
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],  // البصمة الموثقة لحل Invalid account signature
   });
 
   sock.ev.on('creds.update', saveCreds);
