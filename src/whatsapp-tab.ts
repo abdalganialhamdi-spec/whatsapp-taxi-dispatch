@@ -25,7 +25,11 @@ export function whatsappTabHtml(state: {
   const [label, color] = badge[state.connection] ?? ['⚪ غير معروف', '#eee'];
 
   const qrSection = state.qr
-    ? `<div class="qr-box"><img src="${state.qr}" alt="QR"><p>افتح واتساب ← الأجهزة المرتبطة ← ربط جهاز</p></div>`
+    ? `<div class="qr-box">
+         <img id="wa-qr-img" src="${state.qr}" alt="QR">
+         <p>افتح واتساب ← الأجهزة المرتبطة ← ربط جهاز</p>
+         <p class="muted" id="wa-qr-time">🔄 بينجدّد لحاله كل ~20 ثانية</p>
+       </div>`
     : '';
 
   const codeSection = state.pairingCode
@@ -39,8 +43,8 @@ export function whatsappTabHtml(state: {
   return `
 <h2>📡 اتصال الواتساب</h2>
 <div class="wa-status">
-  <span class="st" style="background:${color}">${label}</span>
-  ${state.user ? `<code dir="ltr">${state.user}</code>` : ''}
+  <span class="st" id="wa-badge" style="background:${color}">${label}</span>
+  <code dir="ltr" id="wa-user">${state.user ?? ''}</code>
   ${state.lastError ? `<span class="muted">${state.lastError}</span>` : ''}
 </div>
 
@@ -56,14 +60,72 @@ ${qrSection}
 ${codeSection}
 
 <p class="muted">⚠️ اقتران سِم الشركة — ما تستخدم رقمك الشخصي.</p>
+<p class="muted live-note">🔄 التحديث تلقائي كل 4 ثواني — خلي الصفحة مفتوحة بس.</p>
 
 <script>
 const TOKEN = new URLSearchParams(location.search).get('key') ?? '';
 const GW = '${GATEWAY_URL}';
+let lastQr = null, lastCode = null, pollTimer = null;
 
+async function pollStatus() {
+  try {
+    const r = await fetch(GW + '/status', { headers: { 'x-gateway-token': TOKEN } });
+    if (!r.ok) return;
+    const s = await r.json();
+
+    // شارة الحالة
+    const badge = document.getElementById('wa-badge');
+    if (badge) {
+      const map = {
+        connected:    ['🟢 متصل', '#c9e7d3'],
+        waiting_scan: ['🟡 بانتظار المسح', '#fff3cd'],
+        connecting:   ['🟡 جاري الاتصال', '#fff3cd'],
+        reconnecting: ['🟠 إعادة محاولة', '#fde2c8'],
+        closed:       ['🔴 غير متصل', '#f5d0d0'],
+        initializing: ['🟠 جاري التهيئة', '#fde2c8'],
+      };
+      const [label, color] = map[s.connection] ?? ['⚪ غير معروف', '#eee'];
+      badge.textContent = label;
+      badge.style.background = color;
+    }
+    const u = document.getElementById('wa-user');
+    if (u) u.textContent = s.user ?? '';
+
+    // QR: يتغير تلقائياً لما البوابة تولّد واحد جديد
+    if (s.qr && s.qr !== lastQr) {
+      lastQr = s.qr;
+      let img = document.getElementById('wa-qr-img');
+      if (!img) location.reload(); // أول مرة — نرسم القسم كامل
+      else img.src = s.qr;
+      const t = document.getElementById('wa-qr-time');
+      if (t) t.textContent = 'جُدّد: ' + new Date().toLocaleTimeString('ar-SY');
+    }
+    if (!s.qr && lastQr) {
+      // انمسح — الرحلة خلصت، صفحة جديدة
+      lastQr = null;
+      location.reload();
+    }
+
+    // كود الاقتران
+    if (s.pairingCode && s.pairingCode !== lastCode) {
+      lastCode = s.pairingCode;
+      location.reload(); // أسهل: نرسم الكود الجديد من السيرفر
+    }
+  } catch (e) { /* البوابة مو جاهزة لسا — نرجّع بعدين */ }
+}
+
+function refreshLoop() {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(pollStatus, 4000);
+}
+document.addEventListener('DOMContentLoaded', refreshLoop);
+refreshLoop();
+</script>
+
+<script>
 async function pairQR() {
   await fetch(GW + '/pair/qr?token=' + TOKEN, { method: 'POST' });
-  refreshLoop();
+  lastQr = null; lastCode = null;
 }
 async function pairCode() {
   const phone = document.getElementById('pairPhone').value.replace(/[^0-9]/g, '');
@@ -73,7 +135,7 @@ async function pairCode() {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ phone }),
   });
-  refreshLoop();
+  lastQr = null; lastCode = null;
 }
 async function logout() {
   if (!confirm('قطع الاتصال يمسح الجلسة — متأكد؟')) return;

@@ -83,6 +83,7 @@ async function startWhatsApp(pairPhone = null) {
     printQRInTerminal: false,
     logger: log.child({ module: 'baileys' }),
     markOnlineOnConnect: false,
+    qrTimeout: 20_000,   // QR يتجدد كل 20 ثانية تلقائياً من واتساب
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -92,9 +93,14 @@ async function startWhatsApp(pairPhone = null) {
 
     if (qr && !pairPhone) {
       state.connection = 'waiting_scan';
-      state.qr = await QRCode.toDataURL(qr, { margin: 1, width: 320 });
-      state.qrAt = Date.now();
-      console.log('📱 QR جديد جاهز — امسحه من: الأجهزة المرتبطة ← ربط جهاز');
+      // توليد QR مُنعّد بالخلفية — الصورة تتجدد تلقائياً بسرعة بلا انتظار الواجهة
+      QRCode.toDataURL(qr, { margin: 1, width: 320 })
+        .then((dataUrl) => {
+          state.qr = dataUrl;
+          state.qrAt = Date.now();
+          console.log('📱 QR جديد جاهز (auto-refresh) —', new Date().toLocaleTimeString('ar-SY'));
+        })
+        .catch((e) => state.lastError = `qr render: ${e}`);
     }
 
     // كود الاقتران: يُطلب مرة واحدة بعد جهوزية الاتصال الأولية (قبل الـ QR)
