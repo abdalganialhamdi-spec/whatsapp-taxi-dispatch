@@ -54,6 +54,18 @@ export default {
       return json({ messages: results ?? [] });
     }
 
+    if (request.method === 'POST' && path === '/outbox/fail') {
+      if (!(await checkGatewayAuth(request, env))) return json({ error: 'unauthorized' }, 401);
+      const { ids } = await request.json<{ ids: number[] }>();
+      if (!ids?.length) return json({ ok: true, failed: 0 });
+      await env.DB.prepare(
+        `UPDATE outbox SET sent_at = datetime('now'), text = text || ' ⚠️ [فشل الإرسال نهائياً]' WHERE id IN (${ids.map(() => '?').join(',')})`
+      )
+        .bind(...ids)
+        .run();
+      return json({ ok: true, failed: ids.length });
+    }
+
     if (request.method === 'POST' && path === '/outbox/ack') {
       if (!(await checkGatewayAuth(request, env))) return json({ error: 'unauthorized' }, 401);
       const { ids } = await request.json<{ ids: number[] }>();
