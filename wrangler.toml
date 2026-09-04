@@ -14,6 +14,7 @@ AI_PROTOCOL = "anthropic"
 binding = "DB"
 database_name = "taxi-dispatch"
 database_id = "c4486bf4-b229-4d70-a90e-96c911f5f197"
+migrations_dir = "migrations"
 
 # SECRET: ADMIN_KEY — لا تضعه هنا أبداً
 #   npx wrangler secret put ADMIN_KEY

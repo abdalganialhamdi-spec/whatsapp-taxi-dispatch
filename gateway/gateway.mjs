@@ -21,7 +21,7 @@
  */
 
 import { createRequire } from 'node:module';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, cpSync, rmSync, existsSync, readdirSync, appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
@@ -48,6 +48,17 @@ const HTTP_PORT = Number(process.env.GATEWAY_PORT ?? 3010);
 const POLL_MS = Number(process.env.POLL_MS ?? 1500);
 const SESSION_DIR = process.env.SESSION_DIR ?? join(__dirname, 'session');
 const MAX_RECONNECT_ATTEMPTS = 4;
+const WORKER_TIMEOUT_MS = 10_000;
+const BACKUP_DIR = process.env.BACKUP_DIR ?? join(__dirname, 'session-backups');
+const DATA_DIR = process.env.DATA_DIR ?? join(__dirname, 'data');
+const startedAt = Date.now();
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const maskPhone = (p) => { const s = String(p ?? ''); return s.length > 6 ? `${s.slice(0, 4)}***${s.slice(-2)}` : '***'; };
+// 401 تسجيل خروج، 403 محظور، 411 multidevice mismatch، 440 استبدال، 500 جلسة تالفة
+const FATAL_CODES = new Set([DisconnectReason.loggedOut, 401, 403, 411, 440, 500]);
+// 408 qrTimeout، 428 إغلاق اتصال، 515 يحتاج إعادة مصافحة — لا تحتسب ضد المحاولات
+const NO_COUNT_CODES = new Set([408, 428, 515]);
+let startingPromise = null;   // single-flight: إقلاع واحد فقط بأي لحظة
 
 if (!ADMIN_KEY) {
   console.error('❌ ADMIN_KEY مطلوب');
@@ -55,7 +66,33 @@ if (!ADMIN_KEY) {
 }
 
 mkdirSync(SESSION_DIR, { recursive: true });
+mkdirSync(DATA_DIR, { recursive: true });
 const log = pino({ level: process.env.LOG_LEVEL ?? 'info' });
+
+// ─── الـ Worker: استدعاء موحد بمهلة وإعادة محاولة (أُعيدت بعد حذفها بالخطأ في d3fb21b) ───
+async function worker(path, method = 'GET', body, { retries = 2 } = {}) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetch(`${WORKER_URL}${path}`, {
+        method,
+        headers: { 'content-type': 'application/json', Authorization: 'Bearer ' + ADMIN_KEY },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(WORKER_TIMEOUT_MS),
+      });
+      if (res.ok) return res.status === 204 ? null : await res.json().catch(() => null);
+      const txt = (await res.text().catch(() => '')).slice(0, 200);
+      const err = Object.assign(new Error(`worker ${method} ${path} → ${res.status} ${txt}`), { status: res.status });
+      if (res.status < 500 && res.status !== 408 && res.status !== 429) throw err; // دائم: لا تُعِد
+      lastErr = err;
+    } catch (e) {
+      if (e?.status && e.status < 500) throw e;
+      lastErr = e;
+    }
+    await sleep(300 * 2 ** i + Math.random() * 200);
+  }
+  throw lastErr;
+}
 
 // ─── حالة عملية عالمية ───
 let gen = 0;               // عدّاد التوليد: يعزل أي سوكت قديم فوراً
@@ -86,28 +123,61 @@ const state = {
   pairingCode: null,
   pairingPhone: null,
   pairingExpiresAt: null,
+  pairingRequested: false,
+  sessionInvalid: false,
   user: null,
   lastError: null,
 };
 
-// ─── إغلاق SWocket الحالي بعزل كامل لمستمعاته ───
+// ─── إغلاق السوكت الحالي بعزل كامل لمستمعاته ───
 function killSock() {
   clearTimeout(pairTimer);
+  pairTimer = null;
   clearTimeout(reconnTimer);
+  reconnTimer = null;
   try { sock?.ev.removeAllListeners(); } catch {}
   try { sock?.end(new Error('replaced')); } catch {}
   sock = null;
   gen++;
 }
 
+// ─── أرشفة الجلسة قبل أي مسح (آخر 5 نسخ) — الجلسة لا تضيع أبداً ───
+function archiveSession(reason) {
+  try {
+    if (!existsSync(SESSION_DIR)) return null;
+    mkdirSync(BACKUP_DIR, { recursive: true });
+    const dst = join(BACKUP_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')}-${reason}`);
+    cpSync(SESSION_DIR, dst, { recursive: true });
+    for (const d of readdirSync(BACKUP_DIR).sort().slice(0, -5)) {
+      rmSync(join(BACKUP_DIR, d), { recursive: true, force: true });
+    }
+    return dst;
+  } catch (e) {
+    log.error({ err: String(e) }, 'archive failed');
+    return null;
+  }
+}
+function freshSession(reason) {
+  const backup = archiveSession(reason);
+  rmSync(SESSION_DIR, { recursive: true, force: true });
+  mkdirSync(SESSION_DIR, { recursive: true });
+  if (backup) log.warn({ reason, backup }, 'session reset (archived)');
+}
+
 // ─── الإقلاع: سوكت واحد دائماً — القديم معزول بـ gen ───
+// single-flight: نداءات متزامنة (pair + reconnect + watchdog) تشترك بنفس الإقلاع
 async function startWhatsApp(pairPhone = null) {
-  gen++;
-  const myGen = gen;
-  killSock();
+  if (startingPromise) return startingPromise;
+  startingPromise = _startWhatsApp(pairPhone).finally(() => { startingPromise = null; });
+  return startingPromise;
+}
+async function _startWhatsApp(pairPhone = null) {
+  killSock();               // killSock() نفسها تنفّذ gen++ في نهايتها
+  const myGen = gen;        // الجيل الحالي بعد الإلغاء (إصلاح P0-1: كان gen++ مزدوجاً يقتل كل إقلاع)
+  log.debug({ myGen }, 'generation acquired');
 
   const { state: auth, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
-  if (myGen !== gen || shuttingDown) return;   // انستبدلنا أثناء الانتظار
+  if (myGen !== gen || shuttingDown) { log.info({ myGen, gen }, 'superseded during auth load'); return; }
 
   let version;
   try {
@@ -115,6 +185,7 @@ async function startWhatsApp(pairPhone = null) {
   } catch {
     version = [2, 3000, 1023223821];  // fallback معروف — ما نوقف الخدمة بسبب شبكة
   }
+  if (myGen !== gen || shuttingDown) { log.info({ myGen, gen }, 'superseded during version fetch'); return; }
 
   sock = makeWASocket({
     version,
@@ -136,19 +207,19 @@ async function startWhatsApp(pairPhone = null) {
 
   s.ev.on('creds.update', (c) => { if (myGen === gen) saveCreds(c); });
 
-  // طلب كود اقتران: بعد جهوزية السوكت مباشرة وفقط إذا غير مسجل
+  // طلب كود اقتران: بعد جهوزية السوكت مباشرة وفقط إذا غير مسجل — مع إعادة محاولة
   if (pairPhone && !auth.creds.registered) {
     state.pairingRequested = true;
-    pairTimer = setTimeout(async () => {
-      if (myGen !== gen) return;
+    state.pairingPhone = pairPhone;
+    state.connection = 'waiting_scan';
+    const tryCode = async (left) => {
+      if (myGen !== gen || shuttingDown) return;
       try {
         const code = await s.requestPairingCode(pairPhone);
         if (myGen !== gen) return;
         state.pairingCode = code;
-        state.pairingPhone = pairPhone;
         state.pairingExpiresAt = Date.now() + 120_000;
-        state.connection = 'waiting_scan';
-        console.log(`🔢 كود الاقتران لرقم ${pairPhone}: ${code}`);
+        log.info({ phone: maskPhone(pairPhone) }, 'pairing code issued');
         // انتهاء صلاحية الكود → تنظيف حتى ما يضل معروض قديم
         setTimeout(() => {
           if (myGen === gen && Date.now() >= (state.pairingExpiresAt ?? 0)) {
@@ -157,16 +228,22 @@ async function startWhatsApp(pairPhone = null) {
         }, 121_000).unref();
       } catch (e) {
         if (myGen !== gen) return;
-        state.lastError = `pairing code: ${String(e)}`;
-        state.pairingRequested = false;
-        console.error('❌ طلب كود اقتران فشل:', String(e));
+        state.lastError = `pairing code: ${String(e).slice(0, 160)}`;
+        log.warn({ err: String(e).slice(0, 160), left: left - 1 }, 'pairing code failed');
+        if (left > 1) {
+          pairTimer = setTimeout(() => { tryCode(left - 1); }, 6000);
+        } else {
+          state.pairingRequested = false;
+        }
       }
-    }, 4000);
+    };
+    pairTimer = setTimeout(() => { tryCode(3); }, 4000);
   }
 
   s.ev.on('connection.update', (u) => {
     if (myGen !== gen) return;   // سوكت قديم — تجاهل كامل
     const { connection, lastDisconnect, qr } = u;
+    state.lastActivityAt = Date.now();
 
     if (qr && !pairPhone) {
       state.connection = 'waiting_scan';
@@ -188,25 +265,33 @@ async function startWhatsApp(pairPhone = null) {
       state.pairingPhone = null;
       state.pairingExpiresAt = null;
       state.pairingRequested = false;
+      state.sessionInvalid = false;
       state.lastError = null;
       state.user = s.user?.id ?? null;
       console.log('✅ واتساب متصل:', state.user);
     }
-    if (connection === 'connecting') state.connection = 'connecting';
+    // لا تطمس waiting_scan أثناء انتظار المسح/الكود
+    if (connection === 'connecting' && state.connection !== 'waiting_scan') state.connection = 'connecting';
 
     if (connection === 'close') {
       state.user = null;
       const code = lastDisconnect?.error?.output?.statusCode;
       state.lastError = `disconnect code=${code}`;
-      const fatal = [DisconnectReason.loggedOut, 401, 403, 440].includes(code);
-      if (fatal || ++attempts > MAX_RECONNECT_ATTEMPTS) {
-        // لا إعادة تلقائية — اقتران جديد قرار بشري من اللوحة (حماية الحد اليومي)
+      if (FATAL_CODES.has(code)) {
+        // لا إعادة تلقائية ولا مسح تلقائي — اقتران جديد قرار بشري من اللوحة (حماية الحد اليومي)
         state.connection = 'closed';
+        state.sessionInvalid = [401, 411, 500].includes(code);
         console.log(`🛑 توقف (code=${code}, attempts=${attempts}) — اقتران جديد من اللوحة فقط`);
         return;
       }
+      if (!NO_COUNT_CODES.has(code)) attempts++;
+      if (attempts > MAX_RECONNECT_ATTEMPTS) {
+        state.connection = 'closed';
+        console.log(`🛑 توقف (code=${code}, attempts=${attempts}) — تجاوز السقف، اقتران جديد من اللوحة فقط`);
+        return;
+      }
       state.connection = 'reconnecting';
-      const delay = Math.min(30_000, 3000 * 2 ** attempts);
+      const delay = code === 515 ? 250 : Math.min(60_000, 2000 * 2 ** attempts) + Math.floor(Math.random() * 1000);
       console.log(`⚠️ انقطع (code=${code}) — إعادة محاولة بعد ${delay / 1000}s (محاولة ${attempts}/${MAX_RECONNECT_ATTEMPTS})`);
       reconnTimer = setTimeout(() => {
         if (myGen === gen && !shuttingDown) {
@@ -218,12 +303,16 @@ async function startWhatsApp(pairPhone = null) {
 
   s.ev.on('messages.upsert', async ({ messages, type }) => {
     if (myGen !== gen) return;
-    if (type !== 'notify' && type !== 'append') return;
+    if (type !== 'notify') return;   // لا append ولا offline queue — تمنع رحلات مكررة بعد انقطاع
+    state.lastActivityAt = Date.now();
     for (const m of messages) {
       if (!m.message) continue;
       if (m.key.fromMe) continue;
       const chatId = m.key.remoteJid;
       if (!chatId || chatId === 'status@broadcast') continue;
+      // رسائل أقدم من بدء العملية بـ 5 دقائق — أرشيف متأخر، تجاهل
+      const tsSec = Number(m.messageTimestamp || 0);
+      if (tsSec && tsSec * 1000 < startedAt - 5 * 60_000) continue;
 
       // فك الطبقات: عادي/مؤقت/عرض-مرة/أزرار/قوائم
       const c =
@@ -240,10 +329,9 @@ async function startWhatsApp(pairPhone = null) {
         '';
       if (!text.trim()) continue;
 
-      // dedupe حسب معرف الرسالة
-      if (seenIds.has(m.key.id)) continue;
-      seenIds.set(m.key.id, 1);
-      if (seenIds.size > 2000) seenIds.clear();
+      // dedupe: علّم كمقروء فقط بعد نجاح الـ webhook (الفاشل يُعاد عبر spool)
+      const msgId = m.key.id;
+      if (!msgId || seenHas(msgId)) continue;
 
       // المرسل: بالمجموعات participant، وبالخاص remoteJid
       const senderJid = m.key.participant ?? chatId;
@@ -255,6 +343,7 @@ async function startWhatsApp(pairPhone = null) {
         log.warn({ senderJid }, 'LID بدون senderPn — تجاهل حتى لا يُسجل رقم خاطئ');
         continue;
       }
+      if (!/^\d{7,15}$/.test(senderPhone)) { log.warn('sender phone invalid — skip'); continue; }
 
       // تعلّم LID: رقم ↔ JID
       if (chatId.endsWith('@lid')) learnLid(m.key.senderPn?.split('@')[0] ?? senderPhone, chatId);
@@ -265,18 +354,56 @@ async function startWhatsApp(pairPhone = null) {
       }
 
       try {
-        await worker('/webhook/whatsapp', 'POST', {
-          chatId, senderPhone, text, isGroup: chatId.endsWith('@g.us'),
-        });
+        const payload = { msgId, ts: tsSec, chatId, senderPhone, text, isGroup: chatId.endsWith('@g.us') };
+        await worker('/webhook/whatsapp', 'POST', payload);
+        seenAdd(msgId);
       } catch (e) {
-        log.error({ err: String(e), chatId }, 'webhook failed');
+        log.error({ err: String(e).slice(0, 160), msgId }, 'webhook failed -> spooled');
+        spoolPush({ msgId, ts: tsSec, chatId, senderPhone, text, isGroup: chatId.endsWith('@g.us') });
       }
     }
   });
 }
 
-// dedupe الرسائل الواردة
-const seenIds = new Map();
+// ─── قائمة انتظار على القرص للرسائل التي فشل دفعها (تُفرغ كل 30s) ───
+const SPOOL = join(DATA_DIR, 'inbound-spool.ndjson');
+function spoolPush(p) {
+  try { appendFileSync(SPOOL, `${JSON.stringify(p)}\n`); }
+  catch (e) { log.error({ err: String(e) }, 'spool write failed'); }
+}
+async function spoolDrain() {
+  if (!existsSync(SPOOL)) return;
+  let lines;
+  try { lines = readFileSync(SPOOL, 'utf8').split('\n').filter(Boolean); }
+  catch { return; }
+  if (!lines.length) return;
+  writeFileSync(SPOOL, '');
+  for (const line of lines) {
+    let p;
+    try { p = JSON.parse(line); } catch { continue; }
+    if (!p?.msgId || seenHas(p.msgId)) continue;
+    try { await worker('/webhook/whatsapp', 'POST', p); seenAdd(p.msgId); }
+    catch { spoolPush(p); }
+  }
+}
+setInterval(() => {
+  if (!shuttingDown && state.connection === 'connected') spoolDrain().catch(() => {});
+}, 30_000).unref();
+
+// dedupe الرسائل الواردة: TTL + سقف (FIFO للأقدم — لا clear() يهدم النافذة)
+const SEEN_TTL = 10 * 60_000;
+const SEEN_MAX = 5000;
+const seenIds = new Map(); // id -> timestamp
+function seenHas(id) {
+  const t = seenIds.get(id);
+  if (!t) return false;
+  if (Date.now() - t > SEEN_TTL) { seenIds.delete(id); return false; }
+  return true;
+}
+function seenAdd(id) {
+  seenIds.set(id, Date.now());
+  while (seenIds.size > SEEN_MAX) seenIds.delete(seenIds.keys().next().value);
+}
 
 // رسائل أرسلتها (لـ getMessage عند retry receipt)
 const sentStore = new Map();
@@ -295,6 +422,8 @@ async function outboxLoop() {
           const failed = [];
           for (const m of messages) {
             if (shuttingDown) break;
+            // انقطع الاتصال أثناء الدفعة؟ أكّد المُرسل واقف — الباقي يُسحب لاحقاً
+            if (!sock || state.connection !== 'connected') break;
             try {
               const resp = await sock.sendMessage(resolveJid(m.chat_id), { text: m.text });
               if (!resp?.key?.id) throw new Error(`no message id returned (resp=${JSON.stringify(resp).slice(0, 120)})`);
@@ -302,11 +431,12 @@ async function outboxLoop() {
               failCounts.delete(m.id);
               sentStore.set(resp.key.id, resp);
               if (sentStore.size > 400) sentStore.delete(sentStore.keys().next().value);
-              log.info({ id: m.id, waId: resp.key.id, to: m.chat_id }, 'sent ok');
+              log.info({ id: m.id, waId: resp.key.id, to: maskPhone(String(m.chat_id).split('@')[0]) }, 'sent ok');
             } catch (e) {
-              log.error({ err: String(e), id: m.id }, 'send failed');
+              log.error({ err: String(e).slice(0, 160), id: m.id }, 'send failed');
               const n = (failCounts.get(m.id) ?? 0) + 1;
               failCounts.set(m.id, n);
+              while (failCounts.size > 500) failCounts.delete(failCounts.keys().next().value);
               if (n >= 3) {
                 failCounts.delete(m.id);
                 failed.push(m.id);
@@ -389,26 +519,38 @@ server = createServer(async (req, res) => {
         qr: state.qr,
         qrAgeSec: state.qrAt ? Math.floor((Date.now() - state.qrAt) / 1000) : null,
         pairingCode: state.pairingCode,
-        pairingPhone: state.pairingPhone,
+        pairingPhone: state.pairingPhone ? maskPhone(state.pairingPhone) : null,
         pairingExpiresInSec: state.pairingExpiresAt ? Math.max(0, Math.floor((state.pairingExpiresAt - Date.now()) / 1000)) : null,
+        pairingRequested: state.pairingRequested,
+        sessionInvalid: state.sessionInvalid,
+        attempts,
         lastError: state.lastError,
       }));
       return;
     }
 
-    // اقتران جديد: مرفوض أثناء اتصال حي — قرار قطع أولاً (منع نقر مزدوج)
+    // اقتران جديد: مرفوض أثناء اتصال حي أو إقلاع جارٍ — قرار قطع أولاً (منع نقر مزدوج وحرق المحاولات)
     if ((url.pathname === '/pair/qr' || url.pathname === '/pair/code') && req.method === 'POST') {
+      let body = null;
+      if (url.pathname === '/pair/code') {
+        body = await readBody(req).catch(() => null);
+        if (!body) { res.writeHead(400); res.end(JSON.stringify({ error: 'bad request' })); return; }
+      }
       if (state.connection === 'connected') {
         res.writeHead(409);
         res.end(JSON.stringify({ error: 'متصل حالياً — اعمل /logout أولاً إذا بدك اقتران جديد' }));
         return;
       }
+      const BUSY = ['initializing', 'connecting', 'reconnecting', 'waiting_scan'];
+      if (BUSY.includes(state.connection) && body?.force !== true) {
+        res.writeHead(409);
+        res.end(JSON.stringify({ error: 'اقتران جارٍ — انتظر النتيجة أو أعد المحاولة مع force:true' }));
+        return;
+      }
       killSock();  // عزل كامل للسوكت القديم + مستمعاته
-      const fs = await import('node:fs');
-      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-      mkdirSync(SESSION_DIR, { recursive: true });
+      freshSession(url.pathname === '/pair/qr' ? 'pair-qr' : 'pair-code');  // أرشفة قبل المسح — الجلسة لا تضيع
       state.qr = null; state.pairingCode = null; state.pairingRequested = false;
-      state.pairingPhone = null; state.pairingExpiresAt = null;
+      state.pairingPhone = null; state.pairingExpiresAt = null; state.sessionInvalid = false;
       state.connection = 'initializing'; state.lastError = null;
       attempts = 0;
 
@@ -417,30 +559,26 @@ server = createServer(async (req, res) => {
         res.writeHead(200); res.end(JSON.stringify({ ok: true, mode: 'qr' }));
         return;
       }
-      // /pair/code
-      const body = await readBody(req).catch(() => null);
-      if (!body) { res.writeHead(400); res.end(JSON.stringify({ error: 'bad request' })); return; }
-      const phone = String(body.phone ?? '').replace(/[^0-9]/g, '');
-      if (!/^9\d{8,14}$/.test(phone)) {
+      // /pair/code — رقم دولي E.164 (سوريا 963xxxxxxxxx وغيرها)
+      const phone = String(body.phone ?? '').replace(/[^0-9]/g, '').replace(/^00/, '');
+      if (!/^[1-9]\d{7,14}$/.test(phone)) {
         res.writeHead(400);
         res.end(JSON.stringify({ error: 'رقم غير صالح — لازم دولي بدون + مثال: 963958794195' }));
         return;
       }
       startWhatsApp(phone).catch((e) => { state.lastError = String(e); });
-      res.writeHead(200); res.end(JSON.stringify({ ok: true, mode: 'code', phone }));
+      res.writeHead(200); res.end(JSON.stringify({ ok: true, mode: 'code', phone: maskPhone(phone) }));
       return;
     }
 
     // قطع الاتصال
     if (url.pathname === '/logout' && req.method === 'POST') {
-      gen++;
-      try { await sock?.logout(); } catch {}
+      try { await Promise.race([sock?.logout?.(), sleep(5000)]); } catch {}
       killSock();
-      const fs = await import('node:fs');
-      fs.rmSync(SESSION_DIR, { recursive: true, force: true });
-      mkdirSync(SESSION_DIR, { recursive: true });
+      freshSession('logout');
       state.connection = 'closed'; state.user = null;
-      state.qr = null; state.pairingCode = null;
+      state.qr = null; state.pairingCode = null; state.pairingRequested = false;
+      state.pairingPhone = null; state.pairingExpiresAt = null; state.sessionInvalid = false;
       res.writeHead(200); res.end(JSON.stringify({ ok: true }));
       return;
     }

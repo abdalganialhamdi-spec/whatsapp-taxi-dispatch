@@ -25,8 +25,16 @@ export default {
 
     // ─── واجهة البوابة ───
     if (request.method === 'POST' && path === '/webhook/whatsapp') {
-      const body = await request.json<InboundMessage>();
+      if (!(await checkGatewayAuth(request, env))) return json({ error: 'unauthorized' }, 401);
+      const body = await request.json<InboundMessage & { msgId?: string; ts?: number }>();
       if (!body?.chatId || !body?.text) return json({ error: 'chatId و text مطلوبان' }, 400);
+      // idempotency: نفس الرسالة لا تُعالج مرتين (إعادة spool من البوابة)
+      if (body.msgId) {
+        const dup = await env.DB.prepare(
+          `INSERT OR IGNORE INTO processed_messages (msg_id) VALUES (?)`
+        ).bind(body.msgId).run();
+        if ((dup.meta.changes ?? 0) === 0) return json({ ok: true, duplicate: true });
+      }
       try {
         const outs = await handleMessage(env, {
           chatId: body.chatId,

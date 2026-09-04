@@ -14,6 +14,11 @@ export function whatsappTabHtml(state: {
   pairingExpiresInSec: number | null;
   lastError: string | null;
 }): string {
+  // هروب HTML — قيم البوابة (user/lastError) قد تحمل محارف كاسرة (XSS)
+  const esc = (s: string | null | undefined): string =>
+    String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+  // الـ QR: data:image فقط (أي قيمة أخرى تُرفض)
+  const qr = state.qr && state.qr.startsWith('data:image/') ? state.qr : null;
   const badge: Record<string, [string, string]> = {
     connected: ['🟢 متصل', '#c9e7d3'],
     waiting_scan: ['🟡 بانتظار المسح', '#fff3cd'],
@@ -24,9 +29,9 @@ export function whatsappTabHtml(state: {
   };
   const [label, color] = badge[state.connection] ?? ['⚪ غير معروف', '#eee'];
 
-  const qrSection = state.qr
+  const qrSection = qr
     ? `<div class="qr-box">
-         <img id="wa-qr-img" src="${state.qr}" alt="QR">
+         <img id="wa-qr-img" src="${qr}" alt="QR">
          <p>افتح واتساب ← الأجهزة المرتبطة ← ربط جهاز</p>
          <p class="muted" id="wa-qr-time">🔄 بينجدّد لحاله كل ~20 ثانية</p>
        </div>`
@@ -35,7 +40,7 @@ export function whatsappTabHtml(state: {
   const codeSection = state.pairingCode
     ? `<div class="code-box">
          <p>ادخل هالكود بهالشكل:</p>
-         <div class="code">${state.pairingCode.match(/.{1,4}/g)?.join(' ') ?? state.pairingCode}</div>
+         <div class="code">${esc(state.pairingCode.match(/.{1,4}/g)?.join(' ') ?? state.pairingCode)}</div>
          <p class="muted">واتساب ← الأجهزة المرتبطة ← ربط بالرقم — ينتهي خلال ${state.pairingExpiresInSec ?? '—'} ثانية</p>
        </div>`
     : '';
@@ -44,8 +49,8 @@ export function whatsappTabHtml(state: {
 <h2>📡 اتصال الواتساب</h2>
 <div class="wa-status">
   <span class="st" id="wa-badge" style="background:${color}">${label}</span>
-  <code dir="ltr" id="wa-user">${state.user ?? ''}</code>
-  ${state.lastError ? `<span class="muted">${state.lastError}</span>` : ''}
+  <code dir="ltr" id="wa-user">${esc(state.user)}</code>
+  ${state.lastError ? `<span class="muted">${esc(state.lastError)}</span>` : ''}
 </div>
 
 <div class="wa-actions">
