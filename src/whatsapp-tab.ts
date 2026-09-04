@@ -71,6 +71,7 @@ export function whatsappTabHtml(state: {
          <button class="primary" onclick="pairCode()">▶ بدء اقتران بالرقم (5 دقائق)</button>`}
 </div>
 <p class="muted">🔒 التوليد بزر فقط — كل ضغطة تفتح نافذة 5 دقائق ثم تتوقف تلقائياً لحماية الرقم من الحظر.</p>
+<p class="muted">⚠️ كبسة واحدة تكفي: الكبسة الثانية أثناء وجود كود ترجع <b>نفس الكود</b> — لا تكبس مرتين وتدخل كوداً قديماً.</p>
 
 ${qrSection}
 ${codeSection}
