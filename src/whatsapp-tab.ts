@@ -33,7 +33,7 @@ export function whatsappTabHtml(state: {
     ? `<div class="qr-box">
          <img id="wa-qr-img" src="${qr}" alt="QR">
          <p>افتح واتساب ← الأجهزة المرتبطة ← ربط جهاز</p>
-         <p class="muted" id="wa-qr-time">🔄 بينجدّد لحاله كل ~20 ثانية</p>
+         <p class="muted" id="wa-qr-time">🔄 بينجدّد لحاله كل دقيقة تقريباً</p>
        </div>`
     : '';
 
@@ -97,7 +97,7 @@ async function pollStatus() {
     if (u) u.textContent = s.user ?? '';
 
     // QR: يتغير تلقائياً لما البوابة تولّد واحد جديد
-    if (s.qr && s.qr !== lastQr) {
+    if (s.qr && typeof s.qr === 'string' && s.qr.indexOf('data:image/') === 0 && s.qr !== lastQr) {
       lastQr = s.qr;
       let img = document.getElementById('wa-qr-img');
       if (!img) location.reload(); // أول مرة — نرسم القسم كامل

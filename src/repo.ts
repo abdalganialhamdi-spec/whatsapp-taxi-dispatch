@@ -99,11 +99,12 @@ export async function getActiveRideForClient(db: D1Database, phone: string): Pro
 
 export async function getOpenRideForGroup(db: D1Database, groupJid: string): Promise<Ride | null> {
   // الرحلة المعلقة الحالية في مجموعة توزيع معينة (DISPATCHING)
+  // LEFT JOIN: الطلب الموزع لسا بلا سائق (driver_id NULL) — JOIN عادي كان يخفيه دائماً
   return await db
     .prepare(
       `SELECT r.* FROM rides r
-       JOIN drivers d ON d.id = r.driver_id
-       WHERE r.status = 'DISPATCHING' AND (d.group_jid = ? OR ? = '')
+       LEFT JOIN drivers d ON d.id = r.driver_id
+       WHERE r.status = 'DISPATCHING' AND (d.group_jid = ? OR d.group_jid IS NULL OR ? = '')
        ORDER BY r.id DESC LIMIT 1`
     )
     .bind(groupJid, groupJid)

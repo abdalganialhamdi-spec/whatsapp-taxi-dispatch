@@ -26,6 +26,16 @@ export default {
     // ─── واجهة البوابة ───
     if (request.method === 'POST' && path === '/webhook/whatsapp') {
       if (!(await checkGatewayAuth(request, env))) return json({ error: 'unauthorized' }, 401);
+      // مفتاح الإيقاف: البوت يرد رسالة صيانة ولا يعالج شي
+      const botOff = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'bot_enabled'`).first<{ value: string }>();
+      if (botOff && botOff.value !== '1') {
+        const body0 = await request.json<{ chatId?: string }>().catch((): { chatId?: string } => ({}));
+        if (body0?.chatId) {
+          await env.DB.prepare(`INSERT INTO outbox (chat_id, text) VALUES (?, ?)`)
+            .bind(body0.chatId, '🔧 مشاوير الحموي متوقفة مؤقتاً للصيانة — منرجعلك بأقرب وقت 🙏').run();
+        }
+        return json({ ok: true, maintenance: true });
+      }
       const body = await request.json<InboundMessage & { msgId?: string; ts?: number }>();
       if (!body?.chatId || !body?.text) return json({ error: 'chatId و text مطلوبان' }, 400);
       // idempotency: نفس الرسالة لا تُعالج مرتين (إعادة spool من البوابة)

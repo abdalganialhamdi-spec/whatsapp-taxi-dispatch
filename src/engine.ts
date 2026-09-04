@@ -61,7 +61,15 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
   switch (parsed.intent) {
     case 'BOOK': {
       const active = await repo.getActiveRideForClient(env.DB, msg.senderPhone);
-      if (active) return [{ chatId: msg.chatId, text: rejectClientRide(active) }];
+      if (active) {
+        // طلب NEW معلق أكثر من 15 دقيقة = زبون نسيه — نلغيه تلقائياً ونكمل الحجز الجديد
+        const ageMin = active.created_at ? (Date.now() - new Date(active.created_at).getTime()) / 60000 : 0;
+        if (active.status === 'NEW' && ageMin > 15) {
+          await repo.updateRideStatus(env.DB, active.id, 'CANCELLED');
+        } else {
+          return [{ chatId: msg.chatId, text: rejectClientRide(active) }];
+        }
+      }
       if (!parsed.from_zone || !parsed.to_zone) {
         return [{
           chatId: msg.chatId,
@@ -158,11 +166,19 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
       return [{ chatId: msg.chatId, text: `📋 رحلاتك:\n${lines.join('\n')}` }];
     }
 
-    case 'TALK_HUMAN':
+    case 'TALK_HUMAN': {
+      // تنبيه المدير على الخاص + رد للزبون
+      const admin = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'admin_phone'`).first<{ value: string }>();
+      if (admin?.value) {
+        await env.DB.prepare(`INSERT INTO outbox (chat_id, text, created_at) VALUES (?, ?, ?)`)
+          .bind(`${admin.value}@s.whatsapp.net`, `🗣 زبون طلب موظف: +${msg.senderPhone} — «${msg.text.slice(0, 120)}»`, new Date().toISOString())
+          .run();
+      }
       return [{
         chatId: msg.chatId,
         text: '🗣 تم تحويلك للمهندس — استنى شوي بس، رح يرد عليك أقرب وقت.',
       }];
+    }
 
     case 'HELP':
     case 'UNKNOWN':
@@ -179,6 +195,14 @@ async function handleGroup(
 ): Promise<OutboundMessage[]> {
   if (!driver) {
     // غير مسجل — إذا حاول يقبل نعلمه بدل التجاهل الصامت
+    // (ملاحظة: parseMessage لا يعطي DRIVER_ACCEPT لغير المسجلين، فنكشف الصيغة هنا مباشرة)
+    const norm = normalizeArabic(msg.text);
+    if (/قبلت|موافق|اخدتها|انا جاي|على راسي/.test(norm)) {
+      return [{
+        chatId: msg.chatId,
+        text: `👨‍✈️ أهلاً! هالرقم مو مسجل كسائق — اكلم المهندس يسجلك بالنظام لتقدر تستلم طلبات.`,
+      }];
+    }
     if (intent === 'DRIVER_ACCEPT') {
       return [{
         chatId: msg.chatId,
@@ -260,6 +284,7 @@ async function handleDriverPrivate(
       assertTransition(ride.status, 'DONE');
       await repo.updateRideStatus(env.DB, ride.id, 'DONE');
       await repo.setDriverStatus(env.DB, driver.id, 'AVAILABLE');
+      await repo.notifyClient(env.DB, ride.id, `🏁 وصلت بالسلامة! الأجرة ${formatSYP(ride.price ?? 0)} — تقييمك يهمنا 🙏`);
       const commission = ride.price ? Math.round((ride.price * driver.commission_pct) / 100) : 0;
       return [{
         chatId: msg.chatId,

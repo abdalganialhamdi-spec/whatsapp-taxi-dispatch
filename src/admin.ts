@@ -47,6 +47,11 @@ export async function adminPage(env: Env): Promise<Response> {
      JOIN zones tz ON tz.id = f.to_zone_id
      ORDER BY f.id`
   ).all();
+  const { results: settings } = await env.DB.prepare(`SELECT key, value FROM settings ORDER BY key`).all();
+
+  // هروب HTML لكل القيم القادمة من قاعدة البيانات
+  const esc = (s: unknown): string =>
+    String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 
   const zoneOptions = (zones ?? [])
     .map((z: any) => `<option value="${z.id}">${z.name} (حزام ${z.belt})</option>`)
@@ -84,6 +89,20 @@ export async function adminPage(env: Env): Promise<Response> {
   form.bar label { font-size:13px; color:#6b6558; }
   footer { color:#8a8578; font-size:12px; text-align:center; padding:20px; }
   .muted { color:#8a8578; font-size:13px; }
+  /* 📱 موبايل: أهداف لمس كبيرة + جداول بتمرير أفقي + نماذج مكدسة */
+  @media (max-width:640px) {
+    header { padding:12px 14px; } header h1 { font-size:17px; }
+    main { padding:0 10px 30px; }
+    .stats { padding:12px 10px; grid-template-columns:repeat(2,1fr); gap:8px; }
+    .stat .n { font-size:22px; }
+    table { display:block; overflow-x:auto; white-space:nowrap; }
+    button { min-height:44px; font-size:15px; }
+    input, select { min-height:44px; font-size:16px; max-width:100%; }
+    form.bar { flex-direction:column; align-items:stretch; }
+    form.bar input, form.bar select { width:100% !important; }
+    .qr-box img { width:100%; max-width:280px; height:auto; }
+    .code-box .code { font-size:24px; }
+  }
 </style>
 </head>
 <body>
@@ -105,6 +124,14 @@ ${whatsappTabHtml({
   pairingExpiresInSec: gw?.pairingExpiresInSec ?? null,
   lastError: gw?.lastError ?? (gw === null ? 'البوابة غير متاحة — شغّل gateway.mjs على السيرفر' : null),
 })}
+
+<h2>⚙️ الإعدادات</h2>
+<form class="bar" onsubmit="return saveSettings(event, this)">
+  ${(settings ?? []).map((s: any) => `
+  <label>${esc(s.key)}</label><input name="${esc(s.key)}" value="${esc(s.value)}" dir="ltr" style="width:280px">`).join('')}
+  <button>💾 حفظ الإعدادات</button>
+</form>
+<p class="muted">bot_enabled=1 شغال / 0 صيانة — drivers_group_jid مجموعة السواقين — admin_phone يستقبل تنبيهات «المهندس»</p>
 
 <h2>آخر الرحلات</h2>
 <table>
@@ -226,6 +253,12 @@ function editFare(id, from, to, oldPrice) {
   if (p) api('fare.edit', { id, price: +p });
 }
 function delFare(id) { if (confirm('حذف التعرفة ' + id + '؟')) api('fare.del', { id }); }
+function saveSettings(ev, f) {
+  ev.preventDefault();
+  const body = {};
+  for (const el of f.elements) { if (el.name) body[el.name] = el.value; }
+  return api('settings.set', body);
+}
 </script>
 </body></html>`;
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } });
@@ -286,6 +319,16 @@ export async function adminApi(request: Request, env: Env, action: string): Prom
       }
       case 'fare.del': {
         await env.DB.prepare(`DELETE FROM fixed_fares WHERE id = ?`).bind(Number(body.id)).run();
+        return Response.json({ ok: true });
+      }
+
+      // ─── إعدادات ───
+      case 'settings.set': {
+        for (const [k, v] of Object.entries(body)) {
+          if (!/^[a-z_]{1,40}$/.test(k)) continue;
+          await env.DB.prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+            .bind(k, String(v ?? '')).run();
+        }
         return Response.json({ ok: true });
       }
 
