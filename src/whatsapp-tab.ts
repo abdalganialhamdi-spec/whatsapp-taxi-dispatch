@@ -12,6 +12,8 @@ export function whatsappTabHtml(state: {
   qr: string | null;
   pairingCode: string | null;
   pairingExpiresInSec: number | null;
+  pairingMode?: string | null;
+  pairingWindowSec?: number | null;
   lastError: string | null;
 }): string {
   // هروب HTML — قيم البوابة (user/lastError) قد تحمل محارف كاسرة (XSS)
@@ -28,12 +30,16 @@ export function whatsappTabHtml(state: {
     initializing: ['🟠 جاري التهيئة', '#fde2c8'],
   };
   const [label, color] = badge[state.connection] ?? ['⚪ غير معروف', '#eee'];
+  const pairingActive = state.pairingMode && state.pairingMode !== 'off' &&
+    ['initializing', 'connecting', 'reconnecting', 'waiting_scan'].includes(state.connection);
+  const winSec = state.pairingWindowSec ?? null;
+  const winTxt = winSec != null ? `⏱ تنتهي النافذة خلال ${Math.floor(winSec / 60)}:${String(winSec % 60).padStart(2, '0')}` : '';
 
   const qrSection = qr
     ? `<div class="qr-box">
          <img id="wa-qr-img" src="${qr}" alt="QR">
          <p>افتح واتساب ← الأجهزة المرتبطة ← ربط جهاز</p>
-         <p class="muted" id="wa-qr-time">🔄 بينجدّد لحاله كل دقيقة تقريباً</p>
+         <p class="muted" id="wa-qr-time">🔄 QR يتجدد كل دقيقة ضمن النافذة — ${esc(winTxt)}</p>
        </div>`
     : '';
 
@@ -54,12 +60,17 @@ export function whatsappTabHtml(state: {
 </div>
 
 <div class="wa-actions">
-  <button onclick="pairQR()">📱 اقتران بـ QR</button>
-  <span>أو</span>
-  <input id="pairPhone" dir="ltr" placeholder="9639XXXXXXXXX" inputmode="numeric">
-  <button onclick="pairCode()">🔢 اقتران بالرقم</button>
-  ${state.connection === 'connected' ? '<button class="danger" onclick="logout()">⏏ قطع الاتصال</button>' : ''}
+  ${state.connection === 'connected'
+    ? '<button class="danger" onclick="logout()">⏏ قطع الاتصال</button>'
+    : pairingActive
+      ? `<span class="muted" id="wa-window">${esc(winTxt)}</span>
+         <button class="danger" onclick="stopPair()">⏹ إيقاف التوليد</button>`
+      : `<button class="primary" onclick="pairQR()">▶ بدء اقتران QR (5 دقائق)</button>
+         <span>أو</span>
+         <input id="pairPhone" dir="ltr" placeholder="9639XXXXXXXXX" inputmode="numeric">
+         <button class="primary" onclick="pairCode()">▶ بدء اقتران بالرقم (5 دقائق)</button>`}
 </div>
+<p class="muted">🔒 التوليد بزر فقط — كل ضغطة تفتح نافذة 5 دقائق ثم تتوقف تلقائياً لحماية الرقم من الحظر.</p>
 
 ${qrSection}
 ${codeSection}
@@ -96,6 +107,16 @@ async function pollStatus() {
     const u = document.getElementById('wa-user');
     if (u) u.textContent = s.user ?? '';
 
+    // نافذة الاقتران: عدّاد حي + reload عند انتهائها
+    const w = document.getElementById('wa-window');
+    if (w && s.pairingWindowSec != null) {
+      w.textContent = '⏱ تنتهي النافذة خلال ' + Math.floor(s.pairingWindowSec / 60) + ':' + String(s.pairingWindowSec % 60).padStart(2, '0');
+    }
+    if (w && s.pairingWindowSec == null && (s.pairingMode === 'off' || s.connection === 'closed')) {
+      // كانت نافذة مفتوحة وانتهت → صفحة جديدة تعرض زر البدء
+      if (document.querySelector('.wa-actions .danger')) location.reload();
+    }
+
     // QR: يتغير تلقائياً لما البوابة تولّد واحد جديد
     if (s.qr && typeof s.qr === 'string' && s.qr.indexOf('data:image/') === 0 && s.qr !== lastQr) {
       lastQr = s.qr;
@@ -129,18 +150,34 @@ refreshLoop();
 
 <script>
 async function pairQR() {
-  await fetch(GW + '/pair/qr?token=' + TOKEN, { method: 'POST' });
-  lastQr = null; lastCode = null;
+  try {
+    const r = await fetch(GW + '/pair/qr?token=' + TOKEN, { method: 'POST' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(j.error || ('فشل البدء (' + r.status + ')')); return; }
+    lastQr = null; lastCode = null;
+    location.reload();
+  } catch (e) { alert('تعذر الوصول للبوابة — تأكد أنها شغالة'); }
 }
 async function pairCode() {
   const phone = document.getElementById('pairPhone').value.replace(/[^0-9]/g, '');
-  if (!phone) return alert('اكتب رقم السِم بالصيغة الدولية بدون +');
-  await fetch(GW + '/pair/code?token=' + TOKEN, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ phone }),
-  });
-  lastQr = null; lastCode = null;
+  if (!phone) return alert('اكتب رقم السِم بالصيغة الدولية بدون + (مثال: 963992265248)');
+  try {
+    const r = await fetch(GW + '/pair/code?token=' + TOKEN, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ phone }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { alert(j.error || ('فشل البدء (' + r.status + ')')); return; }
+    lastQr = null; lastCode = null;
+    location.reload();
+  } catch (e) { alert('تعذر الوصول للبوابة — تأكد أنها شغالة'); }
+}
+async function stopPair() {
+  try {
+    await fetch(GW + '/pair/stop?token=' + TOKEN, { method: 'POST' });
+    location.reload();
+  } catch (e) { alert('تعذر الوصول للبوابة'); }
 }
 async function logout() {
   if (!confirm('قطع الاتصال يمسح الجلسة — متأكد؟')) return;

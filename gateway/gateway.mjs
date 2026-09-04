@@ -49,6 +49,7 @@ const POLL_MS = Number(process.env.POLL_MS ?? 1500);
 const SESSION_DIR = process.env.SESSION_DIR ?? join(__dirname, 'session');
 const MAX_RECONNECT_ATTEMPTS = 4;
 const WORKER_TIMEOUT_MS = 10_000;
+const PAIR_WINDOW_MS = 5 * 60_000; // نافذة الاقتران: 5 دقائق فقط بضغطة زر ثم توقف تلقائي
 const BACKUP_DIR = process.env.BACKUP_DIR ?? join(__dirname, 'session-backups');
 const DATA_DIR = process.env.DATA_DIR ?? join(__dirname, 'data');
 const startedAt = Date.now();
@@ -59,6 +60,8 @@ const FATAL_CODES = new Set([DisconnectReason.loggedOut, 401, 403, 411, 440, 500
 // 408 qrTimeout، 428 إغلاق اتصال، 515 يحتاج إعادة مصافحة — لا تحتسب ضد المحاولات
 const NO_COUNT_CODES = new Set([408, 428, 515]);
 let startingPromise = null;   // single-flight: إقلاع واحد فقط بأي لحظة
+let pairWindowTimer = null;  // مؤقت نافذة الـ 5 دقائق
+let wantConnection = false;  // هل نريد اتصالاً حياً؟ false = مطفي بانتظار زر البدء
 
 if (!ADMIN_KEY) {
   console.error('❌ ADMIN_KEY مطلوب');
@@ -117,16 +120,18 @@ function resolveJid(chatId) {
 
 // ─── حالة البوابة (تُعرض على اللوحة) ───
 const state = {
-  connection: 'initializing',   // initializing | waiting_scan | connected | reconnecting | closed
+  connection: 'closed',   // closed | initializing | waiting_scan | connected | reconnecting (يبدأ مطفياً — الاقتران بزر فقط)
   qr: null,
   qrAt: null,
   pairingCode: null,
   pairingPhone: null,
   pairingExpiresAt: null,
   pairingRequested: false,
+  pairingUntil: null,     // نهاية نافذة الـ 5 دقائق
+  pairingMode: 'off',     // off | qr | code
   sessionInvalid: false,
   user: null,
-  lastError: null,
+  lastError: 'الاقتران مطفي — اكبس زر البدء ليولد QR لمدة 5 دقائق',
 };
 
 // ─── إغلاق السوكت الحالي بعزل كامل لمستمعاته ───
@@ -162,6 +167,38 @@ function freshSession(reason) {
   rmSync(SESSION_DIR, { recursive: true, force: true });
   mkdirSync(SESSION_DIR, { recursive: true });
   if (backup) log.warn({ reason, backup }, 'session reset (archived)');
+}
+
+// ─── الاقتران عند الطلب: نافذة 5 دقائق بزر ثم توقف تلقائي (حماية حصة الرقم) ───
+function stopPairing(reason) {
+  clearTimeout(pairWindowTimer);
+  pairWindowTimer = null;
+  wantConnection = false;
+  killSock();
+  state.connection = 'closed';
+  state.user = null;
+  state.qr = null;
+  state.qrAt = null;
+  state.pairingCode = null;
+  state.pairingRequested = false;
+  state.pairingPhone = null;
+  state.pairingExpiresAt = null;
+  state.pairingUntil = null;
+  state.pairingMode = 'off';
+  state.lastError = reason || 'توقف الاقتران — اكبس زر البدء عند الجاهزية';
+  console.log('⏹ اقتران متوقف:', state.lastError);
+}
+function startPairWindow(mode) {
+  clearTimeout(pairWindowTimer);
+  pairWindowTimer = null;
+  wantConnection = true;
+  state.pairingMode = mode;
+  state.pairingUntil = Date.now() + PAIR_WINDOW_MS;
+  state.lastError = null;
+  pairWindowTimer = setTimeout(() => {
+    stopPairing('انتهت مهلة 5 دقائق — اكبس زر الاقتران مجدداً');
+  }, PAIR_WINDOW_MS);
+  if (pairWindowTimer?.unref) pairWindowTimer.unref();
 }
 
 // ─── الإقلاع: سوكت واحد دائماً — القديم معزول بـ gen ───
@@ -246,6 +283,9 @@ async function _startWhatsApp(pairPhone = null) {
     state.lastActivityAt = Date.now();
 
     if (qr && !pairPhone) {
+      // خارج النافذة أو بلا رغبة اتصال → تجاهل (حماية حصة الرقم)
+      if (!wantConnection) return;
+      if (state.pairingMode !== 'off' && state.pairingUntil && Date.now() > state.pairingUntil) return;
       state.connection = 'waiting_scan';
       QRCode.toDataURL(qr, { margin: 1, width: 320 })
         .then((dataUrl) => {
@@ -259,6 +299,10 @@ async function _startWhatsApp(pairPhone = null) {
 
     if (connection === 'open') {
       attempts = 0;
+      clearTimeout(pairWindowTimer);
+      pairWindowTimer = null;
+      state.pairingUntil = null;
+      state.pairingMode = 'off';
       state.connection = 'connected';
       state.qr = null;
       state.pairingCode = null;
@@ -276,9 +320,20 @@ async function _startWhatsApp(pairPhone = null) {
     if (connection === 'close') {
       state.user = null;
       const code = lastDisconnect?.error?.output?.statusCode;
+      // انتهت نافذة الـ 5 دقائق أثناء الاقتران → توقف نهائي بلا إعادة
+      if (state.pairingMode !== 'off' && state.pairingUntil && Date.now() > state.pairingUntil) {
+        stopPairing('انتهت مهلة 5 دقائق — اكبس زر الاقتران مجدداً');
+        return;
+      }
+      // مطفي بانتظار زر البدء → لا إعادة اتصال أبداً
+      if (!wantConnection) {
+        state.connection = 'closed';
+        return;
+      }
       state.lastError = `disconnect code=${code}`;
       if (FATAL_CODES.has(code)) {
         // لا إعادة تلقائية ولا مسح تلقائي — اقتران جديد قرار بشري من اللوحة (حماية الحد اليومي)
+        wantConnection = false;
         state.connection = 'closed';
         state.sessionInvalid = [401, 411, 500].includes(code);
         console.log(`🛑 توقف (code=${code}, attempts=${attempts}) — اقتران جديد من اللوحة فقط`);
@@ -286,6 +341,7 @@ async function _startWhatsApp(pairPhone = null) {
       }
       if (!NO_COUNT_CODES.has(code)) attempts++;
       if (attempts > MAX_RECONNECT_ATTEMPTS) {
+        wantConnection = false;
         state.connection = 'closed';
         console.log(`🛑 توقف (code=${code}, attempts=${attempts}) — تجاوز السقف، اقتران جديد من اللوحة فقط`);
         return;
@@ -522,6 +578,8 @@ server = createServer(async (req, res) => {
         pairingPhone: state.pairingPhone ? maskPhone(state.pairingPhone) : null,
         pairingExpiresInSec: state.pairingExpiresAt ? Math.max(0, Math.floor((state.pairingExpiresAt - Date.now()) / 1000)) : null,
         pairingRequested: state.pairingRequested,
+        pairingMode: state.pairingMode,
+        pairingWindowSec: state.pairingUntil ? Math.max(0, Math.floor((state.pairingUntil - Date.now()) / 1000)) : null,
         sessionInvalid: state.sessionInvalid,
         attempts,
         lastError: state.lastError,
@@ -529,12 +587,27 @@ server = createServer(async (req, res) => {
       return;
     }
 
-    // اقتران جديد: مرفوض أثناء اتصال حي أو إقلاع جارٍ — قرار قطع أولاً (منع نقر مزدوج وحرق المحاولات)
+    // إيقاف التوليد يدوياً — زر الإطفاء باللوحة (آمن دائماً)
+    if (url.pathname === '/pair/stop' && req.method === 'POST') {
+      stopPairing('توقف الاقتران يدوياً — اكبس زر البدء عند الجاهزية');
+      res.writeHead(200); res.end(JSON.stringify({ ok: true, stopped: true }));
+      return;
+    }
+
+    // اقتران جديد: زر بدء → نافذة 5 دقائق ثم توقف تلقائي (حماية حصة الرقم)
+    // مرفوض أثناء اتصال حي — قرار قطع أولاً. إعادة الضغط أثناء النافذة تحتاج force:true
     if ((url.pathname === '/pair/qr' || url.pathname === '/pair/code') && req.method === 'POST') {
       let body = null;
       if (url.pathname === '/pair/code') {
         body = await readBody(req).catch(() => null);
         if (!body) { res.writeHead(400); res.end(JSON.stringify({ error: 'bad request' })); return; }
+        // تحقق من الرقم أولاً — قبل أي مسح للجلسة (رقم غلط كان يمسح الجلسة!)
+        const _phone = String(body.phone ?? '').replace(/[^0-9]/g, '').replace(/^00/, '');
+        if (!/^[1-9]\d{7,14}$/.test(_phone)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: 'رقم غير صالح — لازم دولي بدون + مثال: 963992265248' }));
+          return;
+        }
       }
       if (state.connection === 'connected') {
         res.writeHead(409);
@@ -544,41 +617,45 @@ server = createServer(async (req, res) => {
       const BUSY = ['initializing', 'connecting', 'reconnecting', 'waiting_scan'];
       if (BUSY.includes(state.connection) && body?.force !== true) {
         res.writeHead(409);
-        res.end(JSON.stringify({ error: 'اقتران جارٍ — انتظر النتيجة أو أعد المحاولة مع force:true' }));
+        res.end(JSON.stringify({ error: 'اقتران جارٍ — انتظر النتيجة أو أعد المحاولة مع force:true', windowSec: state.pairingUntil ? Math.max(0, Math.floor((state.pairingUntil - Date.now()) / 1000)) : null }));
         return;
       }
       killSock();  // عزل كامل للسوكت القديم + مستمعاته
       freshSession(url.pathname === '/pair/qr' ? 'pair-qr' : 'pair-code');  // أرشفة قبل المسح — الجلسة لا تضيع
       state.qr = null; state.pairingCode = null; state.pairingRequested = false;
       state.pairingPhone = null; state.pairingExpiresAt = null; state.sessionInvalid = false;
-      state.connection = 'initializing'; state.lastError = null;
+      state.connection = 'initializing';
       attempts = 0;
 
       if (url.pathname === '/pair/qr') {
+        startPairWindow('qr');
+        state.lastError = null;
         startWhatsApp().catch((e) => { state.lastError = String(e); });
-        res.writeHead(200); res.end(JSON.stringify({ ok: true, mode: 'qr' }));
+        res.writeHead(200); res.end(JSON.stringify({ ok: true, mode: 'qr', windowSec: Math.floor(PAIR_WINDOW_MS / 1000) }));
         return;
       }
       // /pair/code — رقم دولي E.164 (سوريا 963xxxxxxxxx وغيرها)
       const phone = String(body.phone ?? '').replace(/[^0-9]/g, '').replace(/^00/, '');
-      if (!/^[1-9]\d{7,14}$/.test(phone)) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: 'رقم غير صالح — لازم دولي بدون + مثال: 963958794195' }));
-        return;
-      }
+      startPairWindow('code');
+      state.lastError = null;
       startWhatsApp(phone).catch((e) => { state.lastError = String(e); });
-      res.writeHead(200); res.end(JSON.stringify({ ok: true, mode: 'code', phone: maskPhone(phone) }));
+      res.writeHead(200); res.end(JSON.stringify({ ok: true, mode: 'code', phone: maskPhone(phone), windowSec: Math.floor(PAIR_WINDOW_MS / 1000) }));
       return;
     }
 
     // قطع الاتصال
     if (url.pathname === '/logout' && req.method === 'POST') {
       try { await Promise.race([sock?.logout?.(), sleep(5000)]); } catch {}
+      clearTimeout(pairWindowTimer);
+      pairWindowTimer = null;
+      wantConnection = false;
       killSock();
       freshSession('logout');
       state.connection = 'closed'; state.user = null;
       state.qr = null; state.pairingCode = null; state.pairingRequested = false;
       state.pairingPhone = null; state.pairingExpiresAt = null; state.sessionInvalid = false;
+      state.pairingUntil = null; state.pairingMode = 'off';
+      state.lastError = 'تم قطع الاتصال — اكبس زر البدء عند الجاهزية';
       res.writeHead(200); res.end(JSON.stringify({ ok: true }));
       return;
     }
@@ -606,6 +683,8 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    wantConnection = false;
+    clearTimeout(pairWindowTimer);
     gen++;
     try { sock?.end(new Error('shutdown')); } catch {}
     try { server?.close(); } catch {}
@@ -613,10 +692,23 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
   });
 }
 
-// الإقلاع: بلا await مجرّد — أي فشل يُسجل ويُعاد بهدوء (لا exit → لا restart loop)
-startWhatsApp().catch((e) => {
-  state.lastError = String(e);
-  log.error({ err: String(e) }, 'startup failed');
-  setTimeout(() => startWhatsApp().catch(() => {}), 5000);
-});
+// الإقلاع: إذا توجد جلسة مسجلة → أعد الاتصال تلقائياً.
+// إذا لا توجد جلسة (جديد/ممسوح) → ابق مطفياً بانتظار زر البدء من اللوحة (حماية حصة الرقم).
+// بلا await مجرّد — أي فشل يُسجل ويُعاد بهدوء (لا exit → لا restart loop)
+try {
+  const _creds = JSON.parse(readFileSync(join(SESSION_DIR, 'creds.json'), 'utf8'));
+  if (_creds?.registered) {
+    wantConnection = true;
+    state.lastError = null;
+    console.log('📂 جلسة مسجلة موجودة — إعادة اتصال تلقائية');
+    startWhatsApp().catch((e) => {
+      state.lastError = String(e);
+      log.error({ err: String(e) }, 'startup failed');
+    });
+  } else {
+    console.log('⏸ لا جلسة مسجلة — بانتظار زر البدء من اللوحة (5 دقائق لكل ضغطة)');
+  }
+} catch {
+  console.log('⏸ لا جلسة — بانتظار زر البدء من اللوحة (5 دقائق لكل ضغطة)');
+}
 outboxLoop();

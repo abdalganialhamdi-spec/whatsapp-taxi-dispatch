@@ -122,6 +122,8 @@ ${whatsappTabHtml({
   qr: gw?.qr ?? null,
   pairingCode: gw?.pairingCode ?? null,
   pairingExpiresInSec: gw?.pairingExpiresInSec ?? null,
+  pairingMode: gw?.pairingMode ?? null,
+  pairingWindowSec: gw?.pairingWindowSec ?? null,
   lastError: gw?.lastError ?? (gw === null ? 'البوابة غير متاحة — شغّل gateway.mjs على السيرفر' : null),
 })}
 
