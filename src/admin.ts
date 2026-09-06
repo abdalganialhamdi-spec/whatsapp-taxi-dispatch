@@ -121,6 +121,7 @@ ${whatsappTabHtml({
   user: gw?.user ?? null,
   qr: gw?.qr ?? null,
   pairingCode: gw?.pairingCode ?? null,
+  pairingPhone: gw?.pairingPhone ?? null,
   pairingExpiresInSec: gw?.pairingExpiresInSec ?? null,
   pairingMode: gw?.pairingMode ?? null,
   pairingWindowSec: gw?.pairingWindowSec ?? null,
