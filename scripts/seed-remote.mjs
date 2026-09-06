@@ -2,7 +2,7 @@
 // يقوم بتهيئة وتعبئة قاعدة بيانات D1 الحية بكامل مناطق حماة (98 منطقة) وأسعار الرحلات (67 خطاً)
 
 const BASE = 'https://whatsapp-taxi-dispatch.abdalganih2.workers.dev';
-const KEY = 'TaxiAdmin_2026!x1';
+const KEY = '[REDACTED]';
 
 const zonesData = [
   // الحزام 1: أحياء مدينة حماة (51 منطقة)
