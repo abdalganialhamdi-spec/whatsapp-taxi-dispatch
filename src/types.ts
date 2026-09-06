@@ -32,6 +32,7 @@ export interface FixedFare {
 export interface Driver {
   id: number;
   phone: string;          // 9639XXXXXXXX
+  lid: string | null;     // هوية واتساب المخفية (LID digits) — تُتعلم تلقائياً
   name: string;
   car: string;
   plate: string;

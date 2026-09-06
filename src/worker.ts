@@ -58,6 +58,8 @@ export default {
         const outs = await handleMessage(env, {
           chatId: body.chatId,
           senderPhone,
+          senderLid: body.senderLid,
+          phoneResolved: body.phoneResolved,
           text: body.text,
           isGroup: body.chatId.endsWith('@g.us'),
         });

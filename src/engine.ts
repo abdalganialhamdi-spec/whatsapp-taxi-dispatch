@@ -13,6 +13,8 @@ import type { Driver, Env, Ride } from './types.js';
 export interface InboundMessage {
   chatId: string;       // JID الوارد (شخص أو مجموعة)
   senderPhone: string;  // رقم مرسل الرسالة (9639...)
+  senderLid?: string;   // هوية واتساب المخفية (@lid) عند توفرها
+  phoneResolved?: boolean; // false = الرقم غير موثوق (LID بلا senderPn وبلا خريطة)
   text: string;
   isGroup: boolean;
 }
@@ -36,7 +38,20 @@ function rejectClientRide(ride: Ride): string {
 
 export async function handleMessage(env: Env, msg: InboundMessage): Promise<OutboundMessage[]> {
   const zones = await repo.getZones(env.DB);
-  const driver = await repo.getDriverByPhone(env.DB, msg.senderPhone);
+  const lid = msg.senderLid ? msg.senderLid.split('@')[0].split(':')[0] : undefined;
+  const driver = await repo.getDriverByPhoneOrLid(env.DB, msg.senderPhone, lid);
+  // تعلّم LID: سائق معروف برقمه وصلنا LID جديد — نخزنه للمستقبل
+  if (driver && lid && driver.lid !== lid) {
+    await repo.setDriverLid(env.DB, driver.id, lid);
+  }
+  // هوية غير محلولة (LID بلا senderPn وبلا خريطة): نوثق ونصمت —
+  // ممنوع اتهام هوية مجهولة بأنها «مو مسجلة»
+  if (!driver && msg.phoneResolved === false) {
+    await repo.logMessage(env.DB, {
+      direction: 'in', chat_id: msg.chatId, sender_phone: msg.senderPhone, text: msg.text, intent: 'LID_UNKNOWN',
+    });
+    return [];
+  }
   const isDriver = !!driver;
   let parsed = parseMessage(msg.text, zones, isDriver);
 

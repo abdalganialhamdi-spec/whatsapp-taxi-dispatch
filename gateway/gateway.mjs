@@ -109,10 +109,25 @@ let server = null;
 
 // ─── LID mapping: الإرسال على الصيغة اللي عندها مفاتيح الجلسة ───
 const lidMap = new Map(); // phone -> xxxxx@lid
+const LIDMAP_FILE = join(DATA_DIR, 'lid-map.json');
+let lidMapSaveAt = 0;
+try {
+  const saved = JSON.parse(readFileSync(LIDMAP_FILE, 'utf8'));
+  for (const [pn, jid] of Object.entries(saved)) {
+    if (/^\d{8,15}$/.test(pn) && typeof jid === 'string') lidMap.set(pn, jid);
+  }
+  console.log(`📇 خريطة LID محمّلة من القرص: ${lidMap.size} رقم`);
+} catch { /* أول إقلاع — لا ملف بعد */ }
 function learnLid(pn, jid) {
   if (!pn || !/^\d{8,15}$/.test(pn) || !jid) return;
   if (lidMap.size > 5000) lidMap.delete(lidMap.keys().next().value);
   lidMap.set(pn, jid);
+  // حفظ مخفّض (مرة كل 30s max) — الخريطة تبقى بعد إعادة التشغيل
+  if (Date.now() - lidMapSaveAt > 30_000) {
+    lidMapSaveAt = Date.now();
+    try { writeFileSync(LIDMAP_FILE, JSON.stringify(Object.fromEntries(lidMap))); }
+    catch (e) { log.warn({ err: String(e) }, 'lid-map save failed'); }
+  }
 }
 function resolveJid(chatId) {
   const phone = chatId.split('@')[0];
@@ -592,18 +607,22 @@ async function requestOneCode(s, att) {
       }
 
       // المرسل: بالمجموعات participant، وبالخاص remoteJid
+      // ملاحظة LID: الرقم الحقيقي يأتي بـ senderPn فقط. بدونه لا نثق بالرقم —
+      // نرسل الهوية كما هي مع phoneResolved=false والـ Worker يوثق ويصمت بدل اتهام بريء.
       const senderJid = m.key.participant ?? chatId;
       let senderPhone = senderJid.split('@')[0].split(':')[0];
-      if (senderJid.endsWith('@lid') && m.key.senderPn) {
-        senderPhone = String(m.key.senderPn).split('@')[0].split(':')[0];
-      } else if (senderJid.endsWith('@lid') && !m.key.senderPn) {
-        console.log(`[LID LOOKUP] فحص خريطة LID للرقم: ${senderJid}`);
-        for (const [pn, l] of lidMap.entries()) {
-          if (l === senderJid) { senderPhone = pn; break; }
-        }
-        if (!/^\d{7,15}$/.test(senderPhone)) {
-          log.warn({ senderJid }, 'LID بدون senderPn وغير معروف بالخريطة — تجاوز');
-          continue;
+      let senderLid = null;
+      let phoneResolved = true;
+      if (senderJid.endsWith('@lid')) {
+        senderLid = senderJid;
+        if (m.key.senderPn) {
+          senderPhone = String(m.key.senderPn).split('@')[0].split(':')[0];
+        } else {
+          console.log(`[LID LOOKUP] فحص خريطة LID للرقم: ${senderJid}`);
+          for (const [pn, l] of lidMap.entries()) {
+            if (l === senderJid) { senderPhone = pn; break; }
+          }
+          if (senderPhone === senderJid.split('@')[0].split(':')[0]) phoneResolved = false;
         }
       }
       if (!/^\d{7,15}$/.test(senderPhone)) {
@@ -611,24 +630,26 @@ async function requestOneCode(s, att) {
         continue;
       }
 
-      // تعلّم LID: رقم ↔ JID
-      if (chatId.endsWith('@lid')) learnLid(m.key.senderPn?.split('@')[0] ?? senderPhone, chatId);
-      if (senderJid.endsWith('@lid')) learnLid(senderPhone, senderJid);
-      if (m.key.senderLid) {
-        const lid = String(m.key.senderLid).includes('@') ? String(m.key.senderLid) : `${m.key.senderLid}@lid`;
-        learnLid(senderPhone, lid);
+      // تعلّم LID: فقط بهوية موثوقة (senderPn أو خريطة) — ممنوع تسميم الخريطة برقم LID نفسه
+      if (phoneResolved) {
+        if (chatId.endsWith('@lid')) learnLid(m.key.senderPn?.split('@')[0] ?? senderPhone, chatId);
+        if (senderJid.endsWith('@lid')) learnLid(senderPhone, senderJid);
+        if (m.key.senderLid) {
+          const lid = String(m.key.senderLid).includes('@') ? String(m.key.senderLid) : `${m.key.senderLid}@lid`;
+          learnLid(senderPhone, lid);
+        }
       }
 
-      console.log(`🚀 [WEBHOOK DISPATCH] دفع إلى Worker: phone=${senderPhone}, text="${text}", msgId=${msgId}`);
+      console.log(`🚀 [WEBHOOK DISPATCH] دفع إلى Worker: phone=${senderPhone}, resolved=${phoneResolved}, text="${text}", msgId=${msgId}`);
 
       try {
-        const payload = { msgId, ts: tsSec, chatId, senderPhone, text, isGroup: chatId.endsWith('@g.us') };
+        const payload = { msgId, ts: tsSec, chatId, senderPhone, senderLid, phoneResolved, text, isGroup: chatId.endsWith('@g.us') };
         await worker('/webhook/whatsapp', 'POST', payload);
         seenAdd(msgId);
         console.log(`✅ [WEBHOOK SUCCESS] تم الاستلام والرد بنجاح من Worker للرسالة: ${msgId}`);
       } catch (e) {
         log.error({ err: String(e).slice(0, 160), msgId }, 'webhook failed -> spooled');
-        spoolPush({ msgId, ts: tsSec, chatId, senderPhone, text, isGroup: chatId.endsWith('@g.us') });
+        spoolPush({ msgId, ts: tsSec, chatId, senderPhone, senderLid, phoneResolved, text, isGroup: chatId.endsWith('@g.us') });
       }
     }
   });

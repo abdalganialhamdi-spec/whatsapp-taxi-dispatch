@@ -8,5 +8,6 @@ session/
 # Baileys runtime (never commit)
 session-backups/
 gateway/session/
+gateway/session-bak-*/
 gateway/data/
 qa/opus-pair-verdict.md

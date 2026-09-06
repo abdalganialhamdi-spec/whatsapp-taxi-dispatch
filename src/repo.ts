@@ -30,6 +30,24 @@ export async function getDriverByPhone(db: D1Database, phone: string): Promise<D
     .first<Driver>();
 }
 
+// مطابقة السائق بالرقم أو بهوية LID (لرسائل المجموعات بلا senderPn)
+export async function getDriverByPhoneOrLid(
+  db: D1Database, phone: string, lid?: string
+): Promise<Driver | null> {
+  if (lid) {
+    const byLid = await db
+      .prepare('SELECT * FROM drivers WHERE lid = ? AND active = 1')
+      .bind(lid)
+      .first<Driver>();
+    if (byLid) return byLid;
+  }
+  return getDriverByPhone(db, phone);
+}
+
+export async function setDriverLid(db: D1Database, id: number, lid: string): Promise<void> {
+  await db.prepare('UPDATE drivers SET lid = ? WHERE id = ?').bind(lid, id).run();
+}
+
 export async function getDriverById(db: D1Database, id: number): Promise<Driver | null> {
   return await db.prepare('SELECT * FROM drivers WHERE id = ?').bind(id).first<Driver>();
 }
