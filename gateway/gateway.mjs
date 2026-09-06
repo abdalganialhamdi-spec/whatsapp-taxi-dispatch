@@ -36,6 +36,7 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  Browsers,
 } = require('@whiskeysockets/baileys');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -257,7 +258,21 @@ async function _startWhatsApp(pairPhone = null, opts = {}) {
   } catch {
     version = [2, 3000, 1023223821];  // fallback معروف — ما نوقف الخدمة بسبب شبكة
   }
+  try {
+    const pkgVer = require('@whiskeysockets/baileys/package.json').version;
+    console.log(`📦 Baileys Package Version: ${pkgVer} | WA Protocol Version: ${JSON.stringify(version)}`);
+  } catch {}
   if (myGen !== gen || shuttingDown) { log.info({ myGen, gen }, 'superseded during version fetch'); return; }
+
+  const retryMap = new Map();
+  const msgRetryCounterCache = {
+    get(key) { return retryMap.get(key); },
+    set(key, value) {
+      if (retryMap.size > 1000) retryMap.delete(retryMap.keys().next().value);
+      retryMap.set(key, value);
+    },
+    del(key) { retryMap.delete(key); },
+  };
 
   sock = makeWASocket({
     version,
@@ -266,16 +281,50 @@ async function _startWhatsApp(pairPhone = null, opts = {}) {
       // حاسم: بدون Cacheable store المفاتيح تتلف أثناء المصافحة → Invalid account signature
       keys: makeCacheableSignalKeyStore(auth.keys, log.child({ module: 'signal-keys' })),
     },
+    msgRetryCounterCache,
     printQRInTerminal: false,
     logger: log.child({ module: 'baileys' }),
     markOnlineOnConnect: false,
     qrTimeout: 180_000,   // 3 دقائق — 60s كانت تقتل السوكت والمستخدم لسا عم يكتب الكود (حكم Opus)
+    defaultQueryTimeoutMs: 60_000,
     syncFullHistory: false,
     shouldSyncHistoryMessage: () => false,
     getMessage: async (key) => sentStore.get(key.id)?.message,
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    browser: Browsers ? Browsers.ubuntu('Chrome') : ['Ubuntu', 'Chrome', '20.0.04'],
   });
   const s = sock; // نسخة محلية: أي مؤقت لاحق يستخدم سوكته هو، مش العالمي
+
+  // تشخيص فوري للرسائل الخام من سيرفر واتساب مباشرة (CB:message)
+  try {
+    s.ws?.on?.('CB:message', (node) => {
+      console.log('\n================== [DIAGNOSTIC] RAW CB:MESSAGE ==================');
+      console.log('Timestamp:', new Date().toISOString(), '| Tag:', node?.tag);
+      console.log('Attrs:', JSON.stringify(node?.attrs || {}));
+      console.dir(node, { depth: 8 });
+      console.log('=================================================================\n');
+    });
+  } catch {}
+
+  // تشخيص أحداث المزامنة والتحديثات الرسمية من Baileys
+  s.ev.on('messaging-history.set', (data) => {
+    console.log('\n================== [DIAGNOSTIC] HISTORY SET ==================');
+    console.log('[HISTORY SET]', {
+      chats: data.chats?.length,
+      contacts: data.contacts?.length,
+      messages: data.messages?.length,
+      syncType: data.syncType,
+      isLatest: data.isLatest,
+    });
+    console.log('==============================================================\n');
+  });
+
+  s.ev.on('messages.update', (updates) => {
+    console.log('\n[DIAGNOSTIC] [MESSAGES UPDATE] Count:', updates?.length);
+  });
+
+  s.ev.on('messages.reaction', (reactions) => {
+    console.log('\n[DIAGNOSTIC] [MESSAGES REACTION] Count:', reactions?.length);
+  });
 
   // كتابة القرص: بعد أول open فقط — أثناء المصافحة الذاكرة فقط (registered=True يُكتب قبل التحقق!)
   s.ev.on('creds.update', async () => {
@@ -378,6 +427,12 @@ async function requestOneCode(s, att) {
       state.lastError = null;
       state.user = s.user?.id ?? null;
       console.log('✅ واتساب متصل:', state.user);
+      try {
+        await s.sendPresenceUpdate('available');
+        console.log('📡 تم إرسال إشعار التواجد (presence: available) لسيرفرات واتساب لتنشيط استلام الرسائل الحية');
+      } catch (e) {
+        log.warn({ err: String(e) }, 'sendPresenceUpdate failed');
+      }
     }
     // لا تطمس waiting_scan أثناء انتظار المسح/الكود
     if (connection === 'connecting' && state.connection !== 'waiting_scan') state.connection = 'connecting';
@@ -459,16 +514,53 @@ async function requestOneCode(s, att) {
 
   s.ev.on('messages.upsert', async ({ messages, type }) => {
     if (myGen !== gen) return;
-    if (type !== 'notify') return;   // لا append ولا offline queue — تمنع رحلات مكررة بعد انقطاع
+
+    console.log('\n================== [DIAGNOSTIC] MESSAGES UPSERT ==================');
+    console.log('[UPSERT]', { type, count: messages?.length, ids: messages?.map(m => m.key?.id) });
+    console.log('TIMESTAMP:', new Date().toISOString());
+    console.log('UPDATE TYPE:', type, '| MESSAGES COUNT:', messages?.length);
+    for (const m of messages || []) {
+      console.log('MESSAGE SUMMARY:', {
+        id: m.key?.id,
+        remoteJid: m.key?.remoteJid,
+        fromMe: m.key?.fromMe,
+        participant: m.key?.participant,
+        senderPn: m.key?.senderPn,
+        stubType: m.messageStubType,
+        hasMessageContent: !!m.message,
+      });
+      if (m.message) {
+        console.log('MESSAGE STRUCTURE:');
+        console.dir(m.message, { depth: 4 });
+      }
+    }
+    console.log('==================================================================\n');
+
     state.lastActivityAt = Date.now();
-    for (const m of messages) {
-      if (!m.message) continue;
-      if (m.key.fromMe) continue;
+    for (const m of messages || []) {
+      const msgId = m.key?.id;
+      if (!m.message) {
+        console.log(`[FILTER] ⏭️ تجاوز: لا يوجد محتوى رسالة (stubType=${m.messageStubType}) ID: ${msgId}`);
+        continue;
+      }
+      if (m.key.fromMe) {
+        console.log(`[FILTER] ⏭️ تجاوز: الرسالة صادرة من البوت نفسه (fromMe=true) ID: ${msgId}`);
+        continue;
+      }
       const chatId = m.key.remoteJid;
-      if (!chatId || chatId === 'status@broadcast') continue;
+      if (!chatId || chatId === 'status@broadcast') {
+        console.log(`[FILTER] ⏭️ تجاوز: حالة واتساب أو chatId فارغ (${chatId}) ID: ${msgId}`);
+        continue;
+      }
+
+      // حساب التوقيت بدقة (يتعامل مع أرقام protobuf أو كائنات Long)
+      const rawTs = m.messageTimestamp;
+      const tsSec = typeof rawTs === 'object' && rawTs !== null ? Number(rawTs.low ?? rawTs) : Number(rawTs || 0);
       // رسائل أقدم من بدء العملية بـ 5 دقائق — أرشيف متأخر، تجاهل
-      const tsSec = Number(m.messageTimestamp || 0);
-      if (tsSec && tsSec * 1000 < startedAt - 5 * 60_000) continue;
+      if (tsSec && tsSec * 1000 < startedAt - 5 * 60_000) {
+        console.log(`[FILTER] ⏭️ تجاوز: رسالة قديمة من أرشيف سابق (ts=${tsSec}, startedAt=${Math.floor(startedAt/1000)}) ID: ${msgId}`);
+        continue;
+      }
 
       // فك الطبقات: عادي/مؤقت/عرض-مرة/أزرار/قوائم
       const c =
@@ -482,24 +574,42 @@ async function requestOneCode(s, att) {
         c.imageMessage?.caption ??
         c.buttonsResponseMessage?.selectedDisplayText ??
         c.listResponseMessage?.title ??
+        c.templateButtonReplyMessage?.selectedId ??
+        c.interactiveResponseMessage?.body?.text ??
         '';
-      if (!text.trim()) continue;
+
+      console.log(`[INCOMING MSG] 📩 نص الرسالة: "${text}" | من Chat: ${chatId} | النوع: ${type}`);
+
+      if (!text.trim()) {
+        console.log(`[FILTER] ⏭️ تجاوز: رسالة بدون نص قابل للمعالجة ID: ${msgId}`);
+        continue;
+      }
 
       // dedupe: علّم كمقروء فقط بعد نجاح الـ webhook (الفاشل يُعاد عبر spool)
-      const msgId = m.key.id;
-      if (!msgId || seenHas(msgId)) continue;
+      if (!msgId || seenHas(msgId)) {
+        console.log(`[FILTER] ⏭️ تجاوز: رسالة معالجة مسبقاً (duplicate) ID: ${msgId}`);
+        continue;
+      }
 
       // المرسل: بالمجموعات participant، وبالخاص remoteJid
       const senderJid = m.key.participant ?? chatId;
-      // رقم الجهاز مفصول بنقطتين — خذ القسم الأول فقط (الدمج كان يشوه الأرقام)
       let senderPhone = senderJid.split('@')[0].split(':')[0];
       if (senderJid.endsWith('@lid') && m.key.senderPn) {
         senderPhone = String(m.key.senderPn).split('@')[0].split(':')[0];
       } else if (senderJid.endsWith('@lid') && !m.key.senderPn) {
-        log.warn({ senderJid }, 'LID بدون senderPn — تجاهل حتى لا يُسجل رقم خاطئ');
+        console.log(`[LID LOOKUP] فحص خريطة LID للرقم: ${senderJid}`);
+        for (const [pn, l] of lidMap.entries()) {
+          if (l === senderJid) { senderPhone = pn; break; }
+        }
+        if (!/^\d{7,15}$/.test(senderPhone)) {
+          log.warn({ senderJid }, 'LID بدون senderPn وغير معروف بالخريطة — تجاوز');
+          continue;
+        }
+      }
+      if (!/^\d{7,15}$/.test(senderPhone)) {
+        log.warn({ senderPhone, senderJid }, 'sender phone invalid — skip');
         continue;
       }
-      if (!/^\d{7,15}$/.test(senderPhone)) { log.warn('sender phone invalid — skip'); continue; }
 
       // تعلّم LID: رقم ↔ JID
       if (chatId.endsWith('@lid')) learnLid(m.key.senderPn?.split('@')[0] ?? senderPhone, chatId);
@@ -509,10 +619,13 @@ async function requestOneCode(s, att) {
         learnLid(senderPhone, lid);
       }
 
+      console.log(`🚀 [WEBHOOK DISPATCH] دفع إلى Worker: phone=${senderPhone}, text="${text}", msgId=${msgId}`);
+
       try {
         const payload = { msgId, ts: tsSec, chatId, senderPhone, text, isGroup: chatId.endsWith('@g.us') };
         await worker('/webhook/whatsapp', 'POST', payload);
         seenAdd(msgId);
+        console.log(`✅ [WEBHOOK SUCCESS] تم الاستلام والرد بنجاح من Worker للرسالة: ${msgId}`);
       } catch (e) {
         log.error({ err: String(e).slice(0, 160), msgId }, 'webhook failed -> spooled');
         spoolPush({ msgId, ts: tsSec, chatId, senderPhone, text, isGroup: chatId.endsWith('@g.us') });
