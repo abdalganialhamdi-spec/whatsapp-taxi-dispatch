@@ -169,10 +169,113 @@ export async function notifyClient(db: D1Database, rideId: number, text: string)
   // سجل الإشعار فقط — الإرسال الفعلي يجري في الـ gateway عند استقبال outbox
   const ride = await getRideById(db, rideId);
   if (!ride) return;
+  await queueOutbox(db, `${ride.client_phone}@s.whatsapp.net`, text, 'BOT');
+}
+
+// ─── سجل الرسائل الموحد + الإرسال (رقم الشركة: بشر أو AI) ───
+
+export async function getSetting(db: D1Database, key: string): Promise<string | null> {
+  const r = await db.prepare(`SELECT value FROM settings WHERE key = ?`).bind(key).first<{ value: string }>();
+  return r?.value ?? null;
+}
+
+/** توثيق أي رسالة (وارد/صادر) — يُستدعى لكل رسالة بلا استثناء */
+export async function logMessage(
+  db: D1Database,
+  m: { direction: 'in' | 'out'; chat_id: string; sender_phone: string; text: string; intent?: string | null }
+): Promise<void> {
   await db
-    .prepare(`INSERT INTO outbox (chat_id, text, created_at) VALUES (?, ?, ?)`)
-    .bind(`${ride.client_phone}@s.whatsapp.net`, text, new Date().toISOString())
+    .prepare(`INSERT INTO messages (direction, chat_id, sender_phone, text, intent) VALUES (?, ?, ?, ?, ?)`)
+    .bind(m.direction, m.chat_id, m.sender_phone, m.text.slice(0, 2000), m.intent ?? null)
     .run();
+}
+
+/** إدخال outbox + توثيق تلقائي — كل الصادر يمر من هنا */
+export async function queueOutbox(db: D1Database, chat_id: string, text: string, sender = 'BOT'): Promise<void> {
+  await db.prepare(`INSERT INTO outbox (chat_id, text) VALUES (?, ?)`).bind(chat_id, text).run();
+  await logMessage(db, { direction: 'out', chat_id, sender_phone: sender, text });
+}
+
+export interface Conversation {
+  chat_id: string;
+  phone: string;        // الرقم المستخرج من الـ JID (أو اسم المجموعة)
+  is_group: boolean;
+  last_text: string;
+  last_at: string;
+  last_dir: string;
+  total: number;
+  paused: boolean;
+}
+
+export async function getConversations(db: D1Database, limit = 30): Promise<Conversation[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT chat_id,
+              MAX(id) AS last_id,
+              COUNT(*) AS total
+       FROM messages GROUP BY chat_id ORDER BY last_id DESC LIMIT ?`
+    )
+    .bind(limit)
+    .all<{ chat_id: string; last_id: number; total: number }>();
+  const paused = await getPausedChats(db);
+  const out: Conversation[] = [];
+  for (const r of results ?? []) {
+    const last = await db
+      .prepare(`SELECT text, created_at, direction FROM messages WHERE id = ?`)
+      .bind(r.last_id)
+      .first<{ text: string; created_at: string; direction: string }>();
+    const isGroup = r.chat_id.endsWith('@g.us');
+    const phone = isGroup ? r.chat_id : r.chat_id.split('@')[0].split(':')[0];
+    out.push({
+      chat_id: r.chat_id,
+      phone,
+      is_group: isGroup,
+      last_text: last?.text ?? '',
+      last_at: last?.created_at ?? '',
+      last_dir: last?.direction ?? '',
+      total: r.total,
+      paused: paused.includes(phone),
+    });
+  }
+  return out;
+}
+
+export interface ChatMessage {
+  id: number;
+  direction: string;
+  sender_phone: string;
+  text: string;
+  intent: string | null;
+  created_at: string;
+}
+
+export async function getChatMessages(db: D1Database, chat_id: string, limit = 60): Promise<ChatMessage[]> {
+  const { results } = await db
+    .prepare(`SELECT id, direction, sender_phone, text, intent, created_at FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?`)
+    .bind(chat_id, limit)
+    .all<ChatMessage>();
+  return (results ?? []).reverse();
+}
+
+/** أرقام موقوف عنها البوت (الرد بشر من اللوحة فقط) */
+export async function getPausedChats(db: D1Database): Promise<string[]> {
+  const v = await getSetting(db, 'paused_chats');
+  try {
+    const arr = JSON.parse(v ?? '[]');
+    return Array.isArray(arr) ? arr.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function setPaused(db: D1Database, phone: string, paused: boolean): Promise<string[]> {
+  const list = (await getPausedChats(db)).filter((p) => p !== phone);
+  if (paused) list.push(phone);
+  await db
+    .prepare(`INSERT INTO settings (key, value) VALUES ('paused_chats', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+    .bind(JSON.stringify(list))
+    .run();
+  return list;
 }
 
 export async function todayStats(db: D1Database) {

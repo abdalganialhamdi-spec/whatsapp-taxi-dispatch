@@ -4,7 +4,7 @@
  */
 
 import { parseMessage, normalizeArabic } from './nlu.js';
-import { aiParse, matchZoneByName } from './ai.js';
+import { aiParse, aiChat, matchZoneByName } from './ai.js';
 import { computeFare, formatSYP } from './pricing.js';
 import { assertTransition } from './ride-state.js';
 import * as repo from './repo.js';
@@ -40,8 +40,9 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
   const isDriver = !!driver;
   let parsed = parseMessage(msg.text, zones, isDriver);
 
-  // طبقة AI: تعمل فقط إذا المفتاح موجود + القواعدي ما فهم شي مفيد
-  if (!isDriver && (parsed.intent === 'UNKNOWN' || (!parsed.from_zone && !parsed.to_zone))) {
+  // طبقة AI: تعمل فقط إذا ai_enabled=1 والمفتاح موجود + القواعدي ما فهم شي مفيد
+  const aiEnabled = (await repo.getSetting(env.DB, 'ai_enabled')) !== '0';
+  if (aiEnabled && !isDriver && (parsed.intent === 'UNKNOWN' || (!parsed.from_zone && !parsed.to_zone))) {
     const ai = await aiParse(env, msg.text, zones);
     if (ai && ai.intent !== 'UNKNOWN') {
       const from = matchZoneByName(ai.from, zones);
@@ -49,6 +50,11 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
       parsed = { intent: ai.intent as typeof parsed.intent, from_zone: from, to_zone: to, raw: msg.text };
     }
   }
+
+  // توثيق الوارد مع النية النهائية — كل رسالة بالسجل
+  await repo.logMessage(env.DB, {
+    direction: 'in', chat_id: msg.chatId, sender_phone: msg.senderPhone, text: msg.text, intent: parsed.intent,
+  });
 
   // ─── رسائل مجموعة السواقين: فقط أوامر سواقين/قبول ───
   if (msg.isGroup) {
@@ -170,9 +176,7 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
       // تنبيه المدير على الخاص + رد للزبون
       const admin = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'admin_phone'`).first<{ value: string }>();
       if (admin?.value) {
-        await env.DB.prepare(`INSERT INTO outbox (chat_id, text, created_at) VALUES (?, ?, ?)`)
-          .bind(`${admin.value}@s.whatsapp.net`, `🗣 زبون طلب موظف: +${msg.senderPhone} — «${msg.text.slice(0, 120)}»`, new Date().toISOString())
-          .run();
+        await repo.queueOutbox(env.DB, `${admin.value}@s.whatsapp.net`, `🗣 زبون طلب موظف: +${msg.senderPhone} — «${msg.text.slice(0, 120)}»`, 'BOT');
       }
       return [{
         chatId: msg.chatId,
@@ -182,8 +186,20 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
 
     case 'HELP':
     case 'UNKNOWN':
-    default:
+    default: {
+      // رد AI حر (ai_chat=1): للخاص غير السواقين فقط — ممنوع عليه ذكر أي سعر
+      const aiChatOn = !isDriver && !msg.isGroup && (await repo.getSetting(env.DB, 'ai_chat')) === '1';
+      if (aiChatOn) {
+        const reply = await aiChat(
+          env,
+          'أنت مساعد شركة مشاوير الحموي للتاكسي بحماة، ترد بالعامية الحموية باختصار (سطرين max). قواعد صارمة: ممنوع منعاً باتاً ذكر أي سعر أو رقم أجرة — التعرفة بيحددها النظام فقط. إذا الزبون بده يحجز اطلب منه «من وين لوين». إذا معصب أو بده موظف قله اكتب «المهندس». لا تخترع مناطق ولا مواعيد.',
+          msg.text,
+          300
+        );
+        if (reply) return [{ chatId: msg.chatId, text: reply }];
+      }
       return [{ chatId: msg.chatId, text: MENU }];
+    }
   }
 }
 

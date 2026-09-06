@@ -66,6 +66,35 @@ export async function aiParse(env: Env, text: string, zones: Zone[]): Promise<Ai
   }
 }
 
+/** محادثة AI حرة (رد على عميل / تلخيص محادثة) — ترجع النص أو null */
+export async function aiChat(env: Env, system: string, user: string, maxTokens = 500): Promise<string | null> {
+  if (!env.AI_API_KEY || !env.AI_BASE_URL) return null;
+  try {
+    const res = await fetch(`${env.AI_BASE_URL}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': env.AI_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: env.AI_MODEL ?? 'glm-4.6',
+        max_tokens: maxTokens,
+        thinking: { type: 'disabled' },
+        system,
+        messages: [{ role: 'user', content: user }],
+      }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
+    const text = (data.content ?? []).filter((c) => c.type === 'text').map((b) => b.text ?? '').join('\n').trim();
+    return text || null;
+  } catch {
+    return null;
+  }
+}
+
 /** مطابقة اسم منطقة من نص الـ AI (أدق من القواعدي لأن الأسماء مفحوصة) */
 export function matchZoneByName(name: string | undefined, zones: Zone[]): Zone | null {
   if (!name) return null;

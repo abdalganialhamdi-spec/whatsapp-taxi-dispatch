@@ -3,10 +3,21 @@
  * كل العمليات: إضافة/تعديل/حذف/إلغاء رحلة — بلا أي framework.
  */
 
-import { todayStats } from './repo.js';
+import { todayStats, getConversations, getChatMessages, getPausedChats, setPaused, queueOutbox } from './repo.js';
+import { aiChat } from './ai.js';
 import { formatSYP } from './pricing.js';
 import { whatsappTabHtml } from './whatsapp-tab.js';
 import type { Env } from './types.js';
+
+/** توحيد صيغة الوجهة: رقم محلي/دولي → JID، أو JID كما هو */
+function normToChat(to: string): string {
+  to = to.trim();
+  if (to.includes('@')) return to;
+  let d = to.replace(/[^0-9]/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  if (d.startsWith('0')) d = '963' + d.slice(1);
+  return d + '@s.whatsapp.net';
+}
 
 const GATEWAY_URL = 'https://almaih.cloud/g';
 
@@ -27,6 +38,7 @@ async function gatewayStatus(adminKey: string): Promise<Record<string, any> | nu
 export async function adminPage(env: Env): Promise<Response> {
   const stats = await todayStats(env.DB);
   const gw = await gatewayStatus(env.ADMIN_KEY);
+  const convs = await getConversations(env.DB, 30);
   const { results: drivers } = await env.DB.prepare(
     `SELECT id, name, phone, car, plate, status, commission_pct FROM drivers WHERE active = 1 ORDER BY id`
   ).all();
@@ -128,13 +140,62 @@ ${whatsappTabHtml({
   lastError: gw?.lastError ?? (gw === null ? 'البوابة غير متاحة — شغّل gateway.mjs على السيرفر' : null),
 })}
 
+<h2>💬 الرسائل — الواجهة الموحدة (بشر أو AI)</h2>
+<style>
+  .inbox { display:grid; grid-template-columns:280px 1fr; gap:12px; }
+  .conv-list { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; max-height:420px; overflow-y:auto; }
+  .conv { display:block; width:100%; text-align:right; background:none; color:var(--ink); border:0; border-bottom:1px solid var(--line); padding:10px 12px; font-size:13px; }
+  .conv.active { background:#e8f5f1; }
+  .conv .ph { font-weight:700; }
+  .conv .prev { color:#8a8578; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:100%; display:block; }
+  .badge-paused { background:#f5d0d0; border-radius:99px; font-size:11px; padding:1px 8px; }
+  .badge-ai { background:#d1ecf1; border-radius:99px; font-size:11px; padding:1px 8px; }
+  .thread-pane { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px; display:flex; flex-direction:column; min-height:200px; }
+  #thread { flex:1; max-height:380px; overflow-y:auto; display:flex; flex-direction:column; gap:6px; margin-bottom:10px; }
+  .b { max-width:85%; padding:8px 12px; border-radius:12px; font-size:14px; white-space:pre-wrap; word-break:break-word; }
+  .b-in { align-self:flex-start; background:#f1ede4; }
+  .b-out { align-self:flex-end; background:#d9efe7; }
+  .b-human { align-self:flex-end; background:#d7e6fb; }
+  .b-meta { font-size:11px; color:#8a8578; margin-top:2px; }
+  .reply-bar { display:flex; gap:8px; }
+  .reply-bar input { flex:1; }
+  .thread-actions { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+  #ai-summary { background:#f6f4ef; border:1px dashed var(--line); border-radius:8px; padding:10px; font-size:13px; white-space:pre-wrap; }
+  @media (max-width:640px) { .inbox { grid-template-columns:1fr; } }
+</style>
+<div class="inbox">
+  <div class="conv-list" id="conv-list">
+    ${convs.length ? convs.map((c) => `
+    <button class="conv" data-chat="${esc(c.chat_id)}" onclick="openChat('${esc(c.chat_id)}', this)">
+      <span class="ph" dir="ltr">${esc(c.is_group ? 'مجموعة' : '+' + c.phone)}</span>
+      ${c.paused ? '<span class="badge-paused">⏸ بشر فقط</span>' : '<span class="badge-ai">بوت</span>'}
+      <span class="prev">${esc((c.last_text ?? '').slice(0, 60))}</span>
+    </button>`).join('') : '<p class="muted" style="padding:12px">لا رسائل بعد — السجل بيظهر هون أول ما يوصل شي على رقم البوت.</p>'}
+  </div>
+  <div class="thread-pane">
+    <div class="thread-actions">
+      <span class="muted" id="thread-title">اختر محادثة 👈</span>
+      <span style="flex:1"></span>
+      <button class="small" id="btn-pause" style="display:none" onclick="togglePause()">⏸ إيقاف البوت</button>
+      <button class="small" id="btn-summary" style="display:none" onclick="aiSummary()">✨ تلخيص AI</button>
+    </div>
+    <div id="ai-summary" style="display:none"></div>
+    <div id="thread"></div>
+    <form class="reply-bar" id="reply-form" style="display:none" onsubmit="return sendHuman(event)">
+      <input id="reply-text" placeholder="اكتب ردك كبشر…" autocomplete="off">
+      <button>📨 إرسال</button>
+    </form>
+    <p class="muted">الرد من هون بيروح باسم الشركة فوراً — استعمل «إيقاف البوت» قبل ما تتدخل مشان ما يرد هو وياك سوا.</p>
+  </div>
+</div>
+
 <h2>⚙️ الإعدادات</h2>
 <form class="bar" onsubmit="return saveSettings(event, this)">
   ${(settings ?? []).map((s: any) => `
   <label>${esc(s.key)}</label><input name="${esc(s.key)}" value="${esc(s.value)}" dir="ltr" style="width:280px">`).join('')}
   <button>💾 حفظ الإعدادات</button>
 </form>
-<p class="muted">bot_enabled=1 شغال / 0 صيانة — drivers_group_jid مجموعة السواقين — admin_phone يستقبل تنبيهات «المهندس»</p>
+<p class="muted">bot_enabled=1 شغال / 0 صيانة — drivers_group_jid مجموعة السواقين — admin_phone يستقبل تنبيهات «المهندس» — ai_enabled=1 مساعد AI للفهم — ai_chat=1 رد AI حر عند غير المفهوم (بدون أسعار أبداً) — paused_chats أرقام موقوف عنها البوت (تُدار بزر ⏸ من تبويب الرسائل)</p>
 
 <h2>آخر الرحلات</h2>
 <table>
@@ -262,17 +323,134 @@ function saveSettings(ev, f) {
   for (const el of f.elements) { if (el.name) body[el.name] = el.value; }
   return api('settings.set', body);
 }
+
+// ─── الواجهة الموحدة للرسائل: عرض + رد بشر + إيقاف + تلخيص ───
+let curChat = null, curPaused = false;
+const escJs = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function openChat(chat, btn) {
+  curChat = chat;
+  document.querySelectorAll('.conv').forEach((b) => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  document.getElementById('thread-title').textContent = chat;
+  document.getElementById('ai-summary').style.display = 'none';
+  try {
+    const r = await fetch(API + 'chat.get?key=' + K + '&chat_id=' + encodeURIComponent(chat));
+    const j = await r.json();
+    if (!r.ok) { alert(j.error || 'فشل التحميل'); return; }
+    curPaused = !!j.paused;
+    paintPauseBtn();
+    const t = document.getElementById('thread');
+    t.innerHTML = (j.messages || []).map((m) => {
+      const cls = m.direction === 'in' ? 'b-in' : (m.sender_phone === 'BOT' ? 'b-out' : 'b-human');
+      const who = m.direction === 'in' ? '+' + escJs(m.sender_phone) : (m.sender_phone === 'BOT' ? '🤖 البوت' : '🧑 بشر');
+      return '<div class="b ' + cls + '">' + escJs(m.text) +
+        '<div class="b-meta">' + who + ' • ' + escJs((m.created_at || '').slice(5, 16)) + (m.intent ? ' • ' + escJs(m.intent) : '') + '</div></div>';
+    }).join('') || '<p class="muted">لا رسائل.</p>';
+    t.scrollTop = t.scrollHeight;
+    document.getElementById('reply-form').style.display = 'flex';
+    document.getElementById('btn-summary').style.display = '';
+  } catch (e) { alert('خطأ شبكة: ' + e); }
+}
+
+function paintPauseBtn() {
+  const b = document.getElementById('btn-pause');
+  b.style.display = '';
+  b.textContent = curPaused ? '▶ تشغيل البوت' : '⏸ إيقاف البوت';
+}
+
+async function postApi(action, body) {
+  const r = await fetch(API + action + '?key=' + K, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(j.error || ('فشلت العملية (' + r.status + ')')); return null; }
+  return j;
+}
+
+async function sendHuman(ev) {
+  ev.preventDefault();
+  const inp = document.getElementById('reply-text');
+  const text = inp.value.trim();
+  if (!text || !curChat) return false;
+  const j = await postApi('msg.send', { to: curChat, text });
+  if (j) { inp.value = ''; openChat(curChat, document.querySelector('.conv.active')); }
+  return false;
+}
+
+async function togglePause() {
+  if (!curChat) return;
+  const phone = curChat.includes('@') ? curChat.split('@')[0].split(':')[0] : curChat;
+  const j = await postApi('chat.pause', { phone, paused: !curPaused });
+  if (j) { curPaused = !curPaused; paintPauseBtn(); location.reload(); }
+}
+
+async function aiSummary() {
+  if (!curChat) return;
+  const box = document.getElementById('ai-summary');
+  box.style.display = 'block';
+  box.textContent = '⏳ عم لخص…';
+  const j = await postApi('ai.summarize', { chat_id: curChat });
+  box.textContent = j ? j.summary : 'فشل التلخيص.';
+}
 </script>
 </body></html>`;
   return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8' } });
 }
 
-/** واجهة API إدارية كاملة CRUD */
+/** واجهة API إدارية كاملة CRUD + الواجهة الموحدة للرسائل */
 export async function adminApi(request: Request, env: Env, action: string): Promise<Response> {
+  const url = new URL(request.url);
+  // قراءات GET (سجل المحادثات) — كتابة POST فقط
+  if (request.method === 'GET') {
+    if (action === 'conv.list') {
+      return Response.json({ conversations: await getConversations(env.DB, 30) });
+    }
+    if (action === 'chat.get') {
+      const chatId = url.searchParams.get('chat_id') ?? '';
+      if (!chatId) return Response.json({ error: 'chat_id مطلوب' }, { status: 400 });
+      const phone = chatId.includes('@') ? chatId.split('@')[0].split(':')[0] : chatId;
+      const paused = (await getPausedChats(env.DB)).includes(phone);
+      return Response.json({ messages: await getChatMessages(env.DB, chatId, 60), paused });
+    }
+    return Response.json({ error: 'GET غير مدعوم لهذا الإجراء' }, { status: 405 });
+  }
   if (request.method !== 'POST') return new Response('POST فقط', { status: 405 });
   const body = await request.json<Record<string, any>>();
   try {
     switch (action) {
+      // ─── الواجهة الموحدة: إرسال بشر + إيقاف + تلخيص ───
+      case 'msg.send': {
+        const text = String(body.text ?? '').trim().slice(0, 2000);
+        if (!text || !body.to) return Response.json({ error: 'to و text مطلوبان' }, { status: 400 });
+        const chatId = normToChat(String(body.to));
+        await queueOutbox(env.DB, chatId, text, 'HUMAN');
+        return Response.json({ ok: true, to: chatId });
+      }
+      case 'chat.pause': {
+        const phone = String(body.phone ?? '').replace(/[^0-9]/g, '');
+        if (!phone) return Response.json({ error: 'phone مطلوب' }, { status: 400 });
+        const list = await setPaused(env.DB, phone, body.paused !== false);
+        return Response.json({ ok: true, paused_chats: list });
+      }
+      case 'ai.summarize': {
+        const chatId = String(body.chat_id ?? '');
+        if (!chatId) return Response.json({ error: 'chat_id مطلوب' }, { status: 400 });
+        const msgs = await getChatMessages(env.DB, chatId, 30);
+        if (!msgs.length) return Response.json({ summary: 'لا رسائل بهالمحادثة.' });
+        const transcript = msgs.map((m) =>
+          m.direction === 'in' ? `العميل (+${m.sender_phone}): ${m.text}`
+            : m.sender_phone === 'BOT' ? `البوت: ${m.text}` : `الموظف: ${m.text}`
+        ).join('\n');
+        const summary = await aiChat(
+          env,
+          'أنت محلل محادثات شركة تاكسي. لخص باختصار بالعربية: طلب الزبون (من/إلى)، حالة الطلب، آخر شي صار، وشو الخطوة الجاية المقترحة للموظف. 6 أسطر max.',
+          transcript,
+          600
+        );
+        if (!summary) return Response.json({ error: 'AI غير مفعّل — اضبط AI_API_KEY ثم جرّب' }, { status: 400 });
+        return Response.json({ summary });
+      }
       // ─── سواقين ───
       case 'driver.add': {
         await env.DB.prepare(

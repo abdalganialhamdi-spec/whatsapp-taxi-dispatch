@@ -11,6 +11,7 @@
  */
 
 import { handleMessage, type InboundMessage } from './engine.js';
+import * as repo from './repo.js';
 import type { Env } from './types.js';
 import { adminPage, adminApi } from './admin.js';
 
@@ -26,18 +27,9 @@ export default {
     // ─── واجهة البوابة ───
     if (request.method === 'POST' && path === '/webhook/whatsapp') {
       if (!(await checkGatewayAuth(request, env))) return json({ error: 'unauthorized' }, 401);
-      // مفتاح الإيقاف: البوت يرد رسالة صيانة ولا يعالج شي
-      const botOff = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'bot_enabled'`).first<{ value: string }>();
-      if (botOff && botOff.value !== '1') {
-        const body0 = await request.json<{ chatId?: string }>().catch((): { chatId?: string } => ({}));
-        if (body0?.chatId) {
-          await env.DB.prepare(`INSERT INTO outbox (chat_id, text) VALUES (?, ?)`)
-            .bind(body0.chatId, '🔧 مشاوير الحموي متوقفة مؤقتاً للصيانة — منرجعلك بأقرب وقت 🙏').run();
-        }
-        return json({ ok: true, maintenance: true });
-      }
       const body = await request.json<InboundMessage & { msgId?: string; ts?: number }>();
       if (!body?.chatId || !body?.text) return json({ error: 'chatId و text مطلوبان' }, 400);
+      const senderPhone = body.senderPhone ?? body.chatId.split('@')[0];
       // idempotency: نفس الرسالة لا تُعالج مرتين (إعادة spool من البوابة)
       if (body.msgId) {
         const dup = await env.DB.prepare(
@@ -45,18 +37,32 @@ export default {
         ).bind(body.msgId).run();
         if ((dup.meta.changes ?? 0) === 0) return json({ ok: true, duplicate: true });
       }
+      // محادثة موقوفة = الرد بشر من اللوحة فقط — نوثق ونصمت
+      if ((await repo.getPausedChats(env.DB)).includes(senderPhone)) {
+        await repo.logMessage(env.DB, {
+          direction: 'in', chat_id: body.chatId, sender_phone: senderPhone, text: body.text, intent: 'PAUSED',
+        });
+        return json({ ok: true, paused: true });
+      }
+      // مفتاح الإيقاف: البوت يرد رسالة صيانة ولا يعالج شي
+      const botOff = await env.DB.prepare(`SELECT value FROM settings WHERE key = 'bot_enabled'`).first<{ value: string }>();
+      if (botOff && botOff.value !== '1') {
+        await repo.logMessage(env.DB, {
+          direction: 'in', chat_id: body.chatId, sender_phone: senderPhone, text: body.text, intent: 'MAINTENANCE',
+        });
+        await repo.queueOutbox(env.DB, body.chatId, '🔧 مشاوير الحموي متوقفة مؤقتاً للصيانة — منرجعلك بأقرب وقت 🙏', 'BOT');
+        return json({ ok: true, maintenance: true });
+      }
       try {
         const outs = await handleMessage(env, {
           chatId: body.chatId,
-          senderPhone: body.senderPhone ?? body.chatId.split('@')[0],
+          senderPhone,
           text: body.text,
           isGroup: body.chatId.endsWith('@g.us'),
         });
-        // اكتب الرسائل الصادرة على outbox ليلتقطها gateway
+        // اكتب الرسائل الصادرة على outbox ليلتقطها gateway (مع التوثيق)
         for (const o of outs) {
-          await env.DB.prepare(`INSERT INTO outbox (chat_id, text) VALUES (?, ?)`)
-            .bind(o.chatId, o.text)
-            .run();
+          await repo.queueOutbox(env.DB, o.chatId, o.text, 'BOT');
         }
         return json({ ok: true, replies: outs.length });
       } catch (e) {
