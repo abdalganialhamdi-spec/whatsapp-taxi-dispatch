@@ -9,3 +9,4 @@ session/
 session-backups/
 gateway/session/
 gateway/data/
+qa/opus-pair-verdict.md
