@@ -233,7 +233,7 @@ async function pairQR() {
 async function pairCode() {
   const el = document.getElementById('pairPhone');
   const phone = (el ? el.value : '').replace(/[^0-9]/g, '');
-  if (!phone) return alert('اكتب رقم السِم بالصيغة الدولية بدون + (مثال: 963992265248)');
+  if (!phone) return alert('اكتب رقم السِم بالصيغة الدولية بدون + (مثال: 9639XXXXXXXX)');
   if (!/^963\\d{9}$/.test(phone)) {
     if (!confirm('الرقم مو بالصيغة 963XXXXXXXXX — متأكد بدك تكمل؟ (' + phone + ')')) return;
   }

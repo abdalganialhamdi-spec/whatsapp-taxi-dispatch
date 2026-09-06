@@ -1,7 +1,7 @@
 # حالة مشروع بوت التكسي — تقرير 2026-09-03
 
 ## ✅ شغال ومؤكد
-- العقل كامل على Worker (NLU + تسعير 45 منطقة + آلة حالات) — LIVE: https://whatsapp-taxi-dispatch.abdalganih2.workers.dev/?key=TaxiAdmin_2026!x1
+- العقل كامل على Worker (NLU + تسعير 45 منطقة + آلة حالات) — LIVE: https://whatsapp-taxi-dispatch.abdalganih2.workers.dev/?key=YOUR_ADMIN_KEY
 - لوحة إدارة عربية RTL + تبويب اقتران — بتشتغل
 - D1: taxi-dispatch (c4486bf4) بحساب abdalganih2
 - CORS بين اللوحة والبوابة منحل (nginx على almaih.cloud: headers + OPTIONS 204)
@@ -9,7 +9,7 @@
 ## ⛔ المشكلة الوحيدة المتبقية: البوابة ما بتجيب QR
 ### السبب الجذري (مؤكد بالفحص)
 - واتساب ما بيقبل جهازين web بنفس الحساب
-- سيم البوت الحالية 963992265248 **موصولة أصلاً** بـ whatsapp-bridge تبع Hermes
+- سيم البوت **موصولة أصلاً** بـ whatsapp-bridge تبع Hermes
   (bridge.js — بوت واتساب شخصي شغال بنفس السيرفر port 3000)
 - taxi-gateway بتحاول تفتح اتصال تاني بنفس الرقم → واتساب يرفض 401/405 قبل ما يطلع QR
 - اختبار مستقل بـ Baileys من /tmp بجلسة نظيفة: QR بيطلع خلال ثواني ✓

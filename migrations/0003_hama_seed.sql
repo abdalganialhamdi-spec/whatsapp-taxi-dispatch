@@ -76,4 +76,4 @@ INSERT INTO fixed_fares (from_zone_id, to_zone_id, price, note) VALUES
 
 -- إعدادات افتراضية
 INSERT OR IGNORE INTO settings (key, value) VALUES ('bot_enabled','1');
-INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_phone','963958794195');
+INSERT OR IGNORE INTO settings (key, value) VALUES ('admin_phone','963900000000'); -- بدّل الرقم من اللوحة بعد أول نشر

@@ -704,7 +704,7 @@ server = createServer(async (req, res) => {
         const _phone = String(body.phone ?? '').replace(/[^0-9]/g, '').replace(/^00/, '');
         if (!/^[1-9]\d{7,14}$/.test(_phone)) {
           res.writeHead(400);
-          res.end(JSON.stringify({ error: 'رقم غير صالح — لازم دولي بدون + مثال: 963992265248' }));
+          res.end(JSON.stringify({ error: 'رقم غير صالح — لازم دولي بدون + مثال: 9639XXXXXXXX' }));
           return;
         }
       }

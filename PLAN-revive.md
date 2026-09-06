@@ -2,7 +2,7 @@
 
 ## الوضع المؤكد (VERIFIED)
 - taxi-gateway شغالة لكن كلها عالقة `initializing` — ما بتوصل لحدث QR
-- السبب: whatsapp-bridge تبع Hermes (pid bridge.js, port 3000) ماسك اتصال واتساب الوحيد للحساب 963992265248
+- السبب: whatsapp-bridge تبع Hermes (pid bridge.js, port 3000) ماسك اتصال واتساب الوحيد للحساب 9639XXXXXXXX
 - واتساب ما بيقبل جهازين web بنفس الحساب → أي اتصال جديد يتصرك 401/405
 - الاختبار المستقل بـ Baileys من /tmp: QR بيطلع خلال ثواني لما ما في تعارض ✓
 - CORS بين اللوحة (workers.dev) و almaih.cloud/g/ منحل (nginx: headers + OPTIONS 204) ✓

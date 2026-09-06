@@ -4,3 +4,8 @@ session/
 .wrangler/
 .dev.vars
 .env
+
+# Baileys runtime (never commit)
+session-backups/
+gateway/session/
+gateway/data/

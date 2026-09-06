@@ -17,7 +17,7 @@
 | 1 | أمان HTTP | ❌ | ~L250 `return t === GATEWAY_TOKEN` (غير timing-safe) • ~L305 `let d=''; req.on('data',c=>(d+=c))` بلا حد • `JSON.parse(d)` داخل `on('end')` = **uncaught → موت العملية** • ~L335 `error: String(e)` • ~L342 `console.log(GATEWAY_TOKEN)` |
 | 2 | الاقتران | ❌ | ~L293/L316 `try { sock.end() } catch {} sock=null` بلا `removeAllListeners` → حدث `close` القديم يصل ~L161 ويولّد سوكت ثانياً؛ `pairingCode/ExpiresAt` ما تُنظّف بعد 120s |
 | 3 | إعادة الاتصال | ❌ | ~L161 `setTimeout(() => startWhatsApp(), 3000)`: بلا `.catch` (unhandledRejection)، بلا سقف/backoff، 403/440 تُعاد للأبد، و`pairPhone` يُفقد؛ + `qrTimeout: 20_000` (~L97) = محاولة تسجيل جديدة كل ~23s → rate-limit |
-| 4 | messages.upsert | ⚠️ | ~L185 `.replace(/:/g,'')` تحوّل `963958794195:12` إلى `96395879419512`؛ لا `ephemeral/viewOnce/buttons`؛ لا dedupe على `key.id`؛ `@lid` بلا `senderPn` يُرسل LID كرقم |
+| 4 | messages.upsert | ⚠️ | ~L185 `.replace(/:/g,'')` تحوّل `9639XXXXXXXX:12` إلى `9639XXXXXXXX12`؛ لا `ephemeral/viewOnce/buttons`؛ لا dedupe على `key.id`؛ `@lid` بلا `senderPn` يُرسل LID كرقم |
 | 5 | outbox | ❌ | ~L230 `m._tries = (m._tries ?? 0) + 1` على كائن جديد من الـ Worker كل دورة → **لا يبلغ 3 أبداً**، الفشل يُعاد كل 1.5s للأبد |
 | 6 | موارد | ❌ | listeners سوكتات قديمة تبقى (تكرار webhook + `saveCreds` يعيد كتابة الجلسة بعد `rmSync`)؛ timer ~L127 ينادي `sock` **العالمي**؛ `lidMap` بلا سقف |
 
