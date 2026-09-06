@@ -465,6 +465,13 @@ function addZone(ev, f) {
 }
 function zoneBelt(id, belt) { api('zone.belt', { id, belt }); }
 function delZone(id) { if (confirm('حذف هالمنطقة؟')) api('zone.del', { id }); }
+function addAlias(ev, id, f) {
+  ev.preventDefault();
+  const v = f.alias.value.trim();
+  if (v) api('zone.alias.add', { id, alias: v });
+  return false;
+}
+function delAlias(id, index) { api('zone.alias.del', { id, index }); }
 `;
   } else if (page === 'drivers') {
     const { results: drivers } = await env.DB.prepare(
@@ -674,6 +681,24 @@ export async function adminApi(request: Request, env: Env, action: string): Prom
       case 'zone.del': {
         await env.DB.prepare(`DELETE FROM zones WHERE id = ?`).bind(Number(body.id)).run();
         return Response.json({ ok: true });
+      }
+      case 'zone.alias.add': {
+        const row = await env.DB.prepare(`SELECT aliases FROM zones WHERE id = ?`).bind(Number(body.id)).first<{ aliases: string | null }>();
+        let arr: string[] = [];
+        try { const a = JSON.parse(row?.aliases || '[]'); if (Array.isArray(a)) arr = a; } catch { arr = []; }
+        const name = String(body.alias ?? '').trim().slice(0, 60);
+        if (!name) return Response.json({ ok: false, error: 'empty' }, { status: 400 });
+        if (!arr.includes(name)) arr.push(name);
+        await env.DB.prepare(`UPDATE zones SET aliases = ? WHERE id = ?`).bind(JSON.stringify(arr), Number(body.id)).run();
+        return Response.json({ ok: true, aliases: arr });
+      }
+      case 'zone.alias.del': {
+        const row = await env.DB.prepare(`SELECT aliases FROM zones WHERE id = ?`).bind(Number(body.id)).first<{ aliases: string | null }>();
+        let arr: string[] = [];
+        try { const a = JSON.parse(row?.aliases || '[]'); if (Array.isArray(a)) arr = a; } catch { arr = []; }
+        arr.splice(Number(body.index), 1);
+        await env.DB.prepare(`UPDATE zones SET aliases = ? WHERE id = ?`).bind(JSON.stringify(arr), Number(body.id)).run();
+        return Response.json({ ok: true, aliases: arr });
       }
 
       // ─── تعاريف ───
