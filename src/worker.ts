@@ -6,14 +6,15 @@
  *   GET  /outbox/pending     — البوابة تسحب ما ينتظر الإرسال (poll كل ثانية)
  *   POST /outbox/ack         — البوابة تأكد الإرسال
  *   GET  /health             — فحص
- *   GET  /                   — لوحة الإدارة (تتطلب ADMIN_KEY بالكوكي أو ?key=)
- *   POST /admin/*            — أوامر الإدارة (سواقين/مناطق/تعاريف)
+ *   GET  /                   — الرئيسية (تتطلب ADMIN_KEY بالكوكي أو ?key=)
+ *   GET  /admin/chats|pricing|drivers|rides|settings|whatsapp — صفحات اللوحة
+ *   POST /admin/*            — أوامر الإدارة (سواقين/مناطق/تعاريف/رسائل)
  */
 
 import { handleMessage, type InboundMessage } from './engine.js';
 import * as repo from './repo.js';
 import type { Env } from './types.js';
-import { adminPage, adminApi } from './admin.js';
+import { adminPage, adminApi, type AdminPageId } from './admin.js';
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -120,7 +121,10 @@ async function handleAdmin(request: Request, env: Env, path: string): Promise<Re
   if (path.startsWith('/admin/api/')) {
     return adminApi(request, env, path.slice('/admin/api/'.length));
   }
-  return adminPage(env);
+  const m = path.match(/^\/admin\/([a-z]+)/);
+  const PAGES = new Set(['chats', 'pricing', 'drivers', 'rides', 'settings', 'whatsapp']);
+  const page: AdminPageId = m && PAGES.has(m[1]) ? (m[1] as AdminPageId) : 'home';
+  return adminPage(env, page, key);
 }
 
 async function checkGatewayAuth(request: Request, env: Env): Promise<boolean> {
