@@ -7,7 +7,7 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 SERVICE_NAME = "whatsapp-taxi-dispatch"
 AI_BASE_URL = "https://api.z.ai/api/anthropic"
-AI_MODEL = "glm-4.6"
+AI_MODEL = "glm-5.3-flash"
 AI_PROTOCOL = "anthropic"
 
 [[d1_databases]]

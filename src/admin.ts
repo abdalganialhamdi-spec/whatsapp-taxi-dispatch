@@ -95,6 +95,10 @@ const SHARED_CSS = `
   .set-row { display:flex; gap:10px; align-items:center; padding:10px 2px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
   .set-row .lab { font-weight:700; min-width:150px; }
   .set-row .hint { color:#8a8578; font-size:12px; flex:1; min-width:200px; }
+  .alias-chip { display:inline-block; background:#e8f5f1; border-radius:99px; padding:2px 4px 2px 10px; margin:2px; font-size:13px; white-space:nowrap; }
+  .alias-chip button { background:none; color:var(--danger); padding:0 6px; min-height:0; font-size:13px; }
+  .alias-add { display:inline-flex; gap:4px; margin:2px; }
+  .alias-add input { min-height:0 !important; padding:4px 8px !important; font-size:13px !important; }
   footer { color:#8a8578; font-size:12px; text-align:center; padding:20px; }
   .muted { color:#8a8578; font-size:13px; }
   /* الدردشة */
@@ -395,8 +399,18 @@ setInterval(() => {
     const zoneOptions = (zones ?? [])
       .map((z: any) => `<option value="${z.id}">${escHtml(z.name)} (حزام ${z.belt})</option>`)
       .join('');
-    const aliasesOf = (z: any): string => {
-      try { return (JSON.parse(z.aliases || '[]') as string[]).join('، '); } catch { return ''; }
+    const aliasesOf = (z: any): string[] => {
+      try { const a = JSON.parse(z.aliases || '[]'); return Array.isArray(a) ? a : []; } catch { return []; }
+    };
+    const aliasesCell = (z: any): string => {
+      const chips = aliasesOf(z).map((a: string, i: number) =>
+        `<span class="alias-chip">${escHtml(a)}<button title="حذف الاسم" onclick="delAlias(${z.id},${i})">×</button></span>`
+      ).join('');
+      return `${chips || '<span class="muted">—</span>'}
+        <form class="alias-add" onsubmit="return addAlias(event, ${z.id}, this)">
+          <input name="alias" placeholder="+ اسم بديل" style="width:100px" maxlength="60">
+          <button class="small">+</button>
+        </form>`;
     };
     body = `<p class="page-desc">من هون بتحدد سعر الانتقال من أي مكان لأي مكان. السعر اليدوي بيفوق الحساب التلقائي دائماً.</p>
 <h2>💰 سعر انتقال من مكان لمكان</h2>
@@ -428,7 +442,7 @@ ${(fares ?? []).map((f: any) => `<tr>
 <table>
 <tr><th>#</th><th>الاسم</th><th>أسماء بديلة</th><th>الحزام</th><th></th></tr>
 ${(zones ?? []).map((z: any) => `<tr>
-  <td>${z.id}</td><td>${escHtml(z.name)}</td><td>${escHtml(aliasesOf(z))}</td><td>حزام ${z.belt}</td>
+  <td>${z.id}</td><td>${escHtml(z.name)}</td><td>${aliasesCell(z)}</td><td>حزام ${z.belt}</td>
   <td>
     <button class="small" onclick="zoneBelt(${z.id},${z.belt >= 3 ? 1 : z.belt + 1})">حزام ← ${z.belt >= 3 ? 1 : z.belt + 1}</button>
     <button class="small danger" onclick="delZone(${z.id})">حذف</button>

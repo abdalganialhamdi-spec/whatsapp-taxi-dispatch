@@ -33,7 +33,7 @@ export async function aiParse(env: Env, text: string, zones: Zone[]): Promise<Ai
 
   const zoneList = zones.map((z) => z.name).join('، ');
   const body = {
-    model: env.AI_MODEL ?? 'glm-4.6',
+    model: env.AI_MODEL ?? 'glm-5.3-flash',
     max_tokens: 300,
     thinking: { type: 'disabled' }, // GLM thinking blocks بتاكل الـ tokens وما بترجع JSON
     system: SYSTEM_PROMPT + `\nأسماء المناطق المتاحة حالياً: ${zoneList}`,
@@ -78,7 +78,7 @@ export async function aiChat(env: Env, system: string, user: string, maxTokens =
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: env.AI_MODEL ?? 'glm-4.6',
+        model: env.AI_MODEL ?? 'glm-5.3-flash',
         max_tokens: maxTokens,
         thinking: { type: 'disabled' },
         system,
