@@ -807,6 +807,32 @@ server = createServer(async (req, res) => {
       return;
     }
 
+    // استئناف جلسة محفوظة (زر آمن): بلا مسح، بلا كود، بلا QR — إعادة اتصال بالمفاتيح الموجودة فقط.
+    // للاستخدام بعد إعادة التشغيل عندما تكون الجلسة على القرص لكن الإقلاع التلقائي لم يعمل.
+    // الفشل يتوقف بهدوء بلا مسح وبلا اقتران — القرار يبقى بشرياً من اللوحة.
+    if (url.pathname === '/resume' && req.method === 'POST') {
+      if (state.connection === 'connected') {
+        res.writeHead(409); res.end(JSON.stringify({ error: 'متصل حالياً — لا حاجة للاستئناف' })); return;
+      }
+      const RBUSY = ['initializing', 'connecting', 'reconnecting', 'waiting_scan'];
+      if (RBUSY.includes(state.connection)) {
+        res.writeHead(409); res.end(JSON.stringify({ error: 'عملية جارية — انتظر النتيجة' })); return;
+      }
+      if (pairAttempt && !pairAttempt.handshakeComplete && !pairAttempt.dead) {
+        res.writeHead(409); res.end(JSON.stringify({ error: 'اقتران جارٍ — لا تلمس، انتظر النتيجة' })); return;
+      }
+      let cur = null;
+      try { cur = JSON.parse(readFileSync(join(SESSION_DIR, 'creds.json'), 'utf8')); } catch {}
+      if (!cur || !cur.me?.id) {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'لا توجد جلسة محفوظة — الاقتران الجديد قرار بشري من اللوحة' })); return;
+      }
+      wantConnection = true; state.lastError = null; attempts = 0;
+      state.connection = 'connecting';
+      startWhatsApp().catch((e) => { state.lastError = String(e); });
+      res.writeHead(200); res.end(JSON.stringify({ ok: true, resume: true }));
+      return;
+    }
+
     // اقتران جديد: زر بدء → نافذة 5 دقائق ثم توقف تلقائي (حماية حصة الرقم)
     // مرفوض أثناء اتصال حي — قرار قطع أولاً. إعادة الضغط أثناء النافذة تحتاج force:true
     if ((url.pathname === '/pair/qr' || url.pathname === '/pair/code') && req.method === 'POST') {
