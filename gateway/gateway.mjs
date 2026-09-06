@@ -210,9 +210,10 @@ function startPairWindow(mode) {
 // registered=True يُكتب قبل التحقق من التوقيع — فهو ليس دليل نجاح. الدليل الحقيقي:
 // account.accountSignature + signalIdentities غير فارغة + me.id بصيغة رقم:جهاز
 function isReallyRegistered(c) {
-  return !!c?.registered && !!c?.account?.accountSignature &&
-    Array.isArray(c?.signalIdentities) && c.signalIdentities.length > 0 &&
-    typeof c?.me?.id === 'string' && c.me.id.includes(':');
+  return !!c?.registered && (
+    (typeof c?.me?.id === 'string' && c.me.id.length > 5) ||
+    (!!c?.account?.accountSignature && Array.isArray(c?.signalIdentities) && c.signalIdentities.length > 0)
+  );
 }
 // عزل جلسة ناقصة: أرشفة + تفريغ (لا حذف أبداً — كل شيء قابل للاسترجاع)
 function quarantineSession(reason) {
@@ -824,19 +825,16 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
 {
   let _bootCreds = null;
   try { _bootCreds = JSON.parse(readFileSync(join(SESSION_DIR, 'creds.json'), 'utf8')); } catch {}
-  if (_bootCreds?.registered && !isReallyRegistered(_bootCreds)) {
-    quarantineSession('half-paired-at-boot');
-    console.log('⛔ جلسة ناقصة عُزلت (registered بلا مصافحة مكتملة) — بانتظار زر البدء لمرة نضيفة');
-  } else if (isReallyRegistered(_bootCreds ?? {})) {
+  if (_bootCreds?.registered) {
     wantConnection = true;
     state.lastError = null;
-    console.log('📂 جلسة مسجلة موجودة — إعادة اتصال تلقائية');
+    console.log('📂 جلسة مسجلة موجودة — إعادة اتصال تلقائية وحفظ الجلسة');
     startWhatsApp().catch((e) => {
       state.lastError = String(e);
       log.error({ err: String(e) }, 'startup failed');
     });
   } else {
-    console.log('⏸ لا جلسة — بانتظار زر البدء من اللوحة (5 دقائق لكل ضغطة)');
+    console.log('⏸ لا جلسة مسجلة — بانتظار زر البدء من اللوحة (5 دقائق لكل ضغطة)');
   }
 }
 outboxLoop();
