@@ -56,30 +56,44 @@ export async function aiParse(
     messages: [{ role: 'user', content: text }],
   };
 
-  try {
-    const res = await fetch(`${env.AI_BASE_URL}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': env.AI_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
-    // GLM يرجع thinking blocks قبل الرد — ناخد آخر text block (النهائي)
-    const blocks = (data.content ?? []).filter((c) => c.type === 'text');
-    const raw = blocks.map((b) => b.text ?? '').join('\n');
-    const m = raw.match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    const parsed = JSON.parse(m[0]) as AiIntent;
-    if (!parsed.intent) return null;
-    return parsed;
-  } catch {
-    return null; // أي فشل → نرجع للقواعدي
+  // محاولة واحدة + إعادة محاولة واحدة عند الفشل — مهلة Z.AI متقلبة (2-7s مرصودة)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`${env.AI_BASE_URL}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': env.AI_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) {
+        if (attempt === 0) continue;
+        return null;
+      }
+      const data = (await res.json()) as { content?: Array<{ type?: string; text?: string }> };
+      // GLM يرجع thinking blocks قبل الرد — ناخد آخر text block (النهائي)
+      const blocks = (data.content ?? []).filter((c) => c.type === 'text');
+      const raw = blocks.map((b) => b.text ?? '').join('\n');
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (!m) {
+        if (attempt === 0) continue;
+        return null;
+      }
+      const parsed = JSON.parse(m[0]) as AiIntent;
+      if (!parsed.intent) {
+        if (attempt === 0) continue;
+        return null;
+      }
+      return parsed;
+    } catch {
+      if (attempt === 0) continue; // مهلة أو شبكة — محاولة ثانية قبل الاستسلام
+      return null; // أي فشل → نرجع للقواعدي
+    }
   }
+  return null;
 }
 
 /** محادثة AI حرة (رد على عميل / تلخيص محادثة) — ترجع النص أو null */
