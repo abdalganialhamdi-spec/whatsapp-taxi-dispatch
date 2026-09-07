@@ -166,7 +166,7 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
       if (!active) return [{ chatId: msg.chatId, text: 'ما في طلب شغال هلق.' }];
       assertTransition(active.status, 'CANCELLED');
       await repo.updateRideStatus(env.DB, active.id, 'CANCELLED');
-      const out: OutboundMessage[] = [{ chatId: msg.chatId, text: `❌ تم إلغاء الطلب ${active.id}. مو منتظرينك بأي وقت 🙌` }];
+      const out: OutboundMessage[] = [{ chatId: msg.chatId, text: `❌ تم إلغاء الطلب ${active.id}.\nإذا حبيت تحجز مرة تانية من أي وقت — منوجر انشالله 🙏` }];
       if (active.driver_id) {
         const d = await repo.getDriverById(env.DB, active.driver_id);
         if (d) out.push({ chatId: `${d.phone}@s.whatsapp.net`, text: `⚠️ الزبون ألغى الطلب ${active.id}.` });
