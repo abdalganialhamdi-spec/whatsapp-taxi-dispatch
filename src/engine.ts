@@ -114,14 +114,13 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
   }
 
   // ─── رسائل خاصة ───
-  if (isDriver) return handleDriverPrivate(env, msg, driver, parsed.intent);
-
-  // ─── أوامر المدير/المهندس (قبل مسار الزبون): قبل السائق #ID / ارفض السائق #ID ───
+  // أوامر الإدارة أولاً — حتى لو الرقم مسجل كسائق (المدير/المهندس ممكن يكونوا سواقين كمان)
   const managerOrAdmin = await isManagerOrAdmin(env, msg.senderPhone);
   if (managerOrAdmin) {
-    const approve = normalizeArabic(msg.text).match(/(?:قبل|اقبل)\s*(?:السايق|السائق|#?)\s*#?([0-9٠-٩]{1,6})/);
-    const reject = normalizeArabic(msg.text).match(/(?:ارفض|رفض)\s*(?:السايق|السائق|#?)\s*#?([0-9٠-٩]{1,6})/);
+    const normTxt = normalizeArabic(msg.text);
     const toWestern = (s: string) => s.replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+    const approve = normTxt.match(/(?:قبل|اقبل)\s*(?:السايق|السائق|#?)\s*#?([0-9٠-٩]{1,6})/);
+    const reject = normTxt.match(/(?:ارفض|رفض)\s*(?:السايق|السائق|#?)\s*#?([0-9٠-٩]{1,6})/);
     if (approve || reject) {
       const id = Number(toWestern((approve ?? reject)![1]));
       const app = await repo.getDriverApplicationById(env.DB, id);
@@ -151,6 +150,8 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
       ];
     }
   }
+
+  if (isDriver) return handleDriverPrivate(env, msg, driver, parsed.intent);
 
   // ─── تقديم طلب سائق: جمع تدريجي بالحوار ───
   if (parsed.intent === 'DRIVER_APPLY') {
