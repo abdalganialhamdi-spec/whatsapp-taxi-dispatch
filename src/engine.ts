@@ -26,10 +26,12 @@ export interface OutboundMessage {
 
 const MENU = `🚕 أهلا فيك بمشاوير الحموي!
 شو بتحب؟
-1️⃣ احجز سيارة — اكتب مثلا: «بدي روح من طريق حلب لعند المخيم»
+1️⃣ احجز سيارة — احكي مثلا: «بدي روح من طريق حلب لعند المخيم»
 2️⃣ اسأل عن التعرفة — «كم من الصابونية لجنوب الثكنة»
 3️⃣ رحلاتي — اكتب «رحلاتي»
-4️⃣ تحدث مع موظف — اكتب «المهندس»`;
+4️⃣ تحدث مع موظف — اكتب «المهندس»
+
+🎤 فيك تبعث رسالة صوتية عادي — منفهمك`;
 
 function rejectClientRide(ride: Ride): string {
   const n = ride.id;
@@ -210,7 +212,7 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
       if (!active) return [{ chatId: msg.chatId, text: 'ما في طلب شغال هلق.' }];
       assertTransition(active.status, 'CANCELLED');
       await repo.updateRideStatus(env.DB, active.id, 'CANCELLED');
-      const out: OutboundMessage[] = [{ chatId: msg.chatId, text: `❌ تم إلغاء الطلب ${active.id}.\nإذا حبيت تحجز مرة تانية من أي وقت — منوجر انشالله 🙏` }];
+      const out: OutboundMessage[] = [{ chatId: msg.chatId, text: `❌ تم إلغاء الطلب ${active.id}.\nإذا بتحب تحجز مرة تانية من أي وقت — احنا موجودين 🙏` }];
       if (active.driver_id) {
         const d = await repo.getDriverById(env.DB, active.driver_id);
         if (d) out.push({ chatId: `${d.phone}@s.whatsapp.net`, text: `⚠️ الزبون ألغى الطلب ${active.id}.` });
@@ -254,7 +256,7 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
         const profile = routine ? `\n\nروتين هالزبون المعروف عندنا (من مشاويره السابقة):\n${routine}\nإذا رسالته غامضة وتنطبق على روتينه، اقترح عليه روتينه واسأله للتأكيد (مثلاً إذا يوم مختلف عن عادته اسأله). ما تحجز بداله — بس اقترح واسأل.` : '';
         const reply = await aiChat(
           env,
-          'أنت مساعد شركة مشاوير الحموي للتاكسي بحماة، ترد بالعامية الحموية باختصار (سطرين max). قواعد صارمة: ممنوع منعاً باتاً ذكر أي سعر أو رقم أجرة — التعرفة بيحددها النظام فقط. إذا الزبون بده يحجز اطلب منه «من وين لوين». إذا معصب أو بده موظف قله اكتب «المهندس». لا تخترع مناطق ولا مواعيد.' + profile,
+          'أنت مساعد شركة مشاوير الحموي للتاكسي بحماة، ترد بالعامية الحموية الحموية الأصيلة باختصار (سطرين max). قواعد لغوية: احكي متل أهل حماة بالضبط — استعمل «منين، وين، لعد، هيك، شوي، هلأ، منيح، والو» ولا تستعمل كلمات فصحى أو لهجات غريبة (ما بتحكي «منوجر» ولا «سوف نلتقي»). قواعد صارمة: ممنوع منعاً باتاً ذكر أي سعر أو رقم أجرة — التعرفة بيحددها النظام فقط. إذا الزبون بده يحجز اطلب منه «من وين لوين». إذا معصب أو بده موظف قله اكتب «المهندس». لا تخترع مناطق ولا مواعيد. راجع محادثتك السابقة تحت — إذا سألك عن شي صار قبل شوي جاوبه منه.' + profile,
           msg.text,
           300,
           history
@@ -303,7 +305,7 @@ async function handleGroup(
     }
   } else {
     open = await repo.getOpenRideForGroup(env.DB, msg.chatId);
-    if (!open) return [{ chatId: msg.chatId, text: 'ما في طلب مفتوح هلق 👍' }];
+    if (!open) return [{ chatId: msg.chatId, text: 'ما في طلب مفتوح هلق' }];
   }
 
   if (intent === 'DRIVER_DECLINE') return []; // صامت — ما داعي زحمة بالمجموعة
@@ -315,7 +317,7 @@ async function handleGroup(
   const out: OutboundMessage[] = [
     {
       chatId: msg.chatId,
-      text: `✅ الطلب ${open.id} صار لأبو ${driver.name} — الباقي بلكي على الجاي 🙏`,
+      text: `✅ الطلب ${open.id} صار لأبو ${driver.name} — الباقي عالأعاصير`,
     },
     {
       chatId: `${open.client_phone}@s.whatsapp.net`,
