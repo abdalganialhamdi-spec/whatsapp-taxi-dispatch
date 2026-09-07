@@ -292,16 +292,30 @@ async function handleGroup(
     }
     return [];
   }
+  // السواق بيبعت رقم الطلب لحاله («9» / «٩») — نفهمها قبول إذا الطلب منشور بنفس المجموعة
+  if (intent !== 'DRIVER_ACCEPT' && intent !== 'DRIVER_DECLINE' && driver) {
+    const numMatch = normalizeArabic(msg.text).match(/^[#\s]*([0-9٠-٩]{1,6})$/);
+    if (numMatch) {
+      const n = Number(numMatch[1].replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))));
+      const ride = await repo.getRideById(env.DB, n);
+      if (ride && ride.status === 'DISPATCHING' && ride.id === n) {
+        intent = 'DRIVER_ACCEPT';
+      }
+    }
+  }
   if (intent !== 'DRIVER_ACCEPT' && intent !== 'DRIVER_DECLINE') return [];
 
   // «قبلت 12» — قبول برقم محدد، أو «قبلت» لأحدث طلب منشور
   const norm = normalizeArabic(msg.text);
-  const idMatch = norm.match(/قبلت\s*(#?)(\d{1,6})/);
+  // يدعم الأرقام العربية/الهندية (٩=9)
+  const toWestern = (s: string) => s.replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+  const idMatch = norm.match(/قبلت\s*(#?)([0-9٠-٩]{1,6})/) ?? norm.match(/^[#\s]*([0-9٠-٩]{1,6})$/);
   let open: Ride | null = null;
   if (idMatch) {
-    open = await repo.getRideById(env.DB, Number(idMatch[2]));
+    const n = Number(toWestern(idMatch[2] ?? idMatch[1]));
+    open = await repo.getRideById(env.DB, n);
     if (!open || open.status !== 'DISPATCHING') {
-      return [{ chatId: msg.chatId, text: `الطلب ${idMatch[2]} إما انمسح أو اناخد من قبل 🙏` }];
+      return [{ chatId: msg.chatId, text: `الطلب ${n} إما انمسح أو اناخد من قبل 🙏` }];
     }
   } else {
     open = await repo.getOpenRideForGroup(env.DB, msg.chatId);
