@@ -8,7 +8,7 @@ import { aiParse, aiChat, matchZoneByName } from './ai.js';
 import { computeFare, formatSYP } from './pricing.js';
 import { assertTransition } from './ride-state.js';
 import * as repo from './repo.js';
-import type { Driver, Env, Ride } from './types.js';
+import type { Driver, Env, Ride, Zone } from './types.js';
 
 export interface InboundMessage {
   chatId: string;       // JID الوارد (شخص أو مجموعة)
@@ -59,6 +59,35 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
 
   let parsed = parseMessage(msg.text, zones, isDriver);
 
+  // ─── مواصلة حجز معلق: الزبون جاوب على «وين توصل؟» / «منين بتطلع؟» ───
+  if (!isDriver && !msg.isGroup) {
+    const pending = await repo.getPendingBooking(env.DB, msg.chatId);
+    if (pending && (pending.from_zone_id || pending.to_zone_id)) {
+      const knownFrom = pending.from_zone_id ? zones.find((z) => z.id === pending.from_zone_id) : null;
+      const knownTo = pending.to_zone_id ? zones.find((z) => z.id === pending.to_zone_id) : null;
+      // نحاول نطابق المنطقة الجديدة بهالرسالة (بالاسم/الأسماء البديلة/الـ AI)
+      let newZone: Zone | null = null;
+      for (const z of zones) {
+        const norm = normalizeArabic(msg.text);
+        const cands = [z.name, ...(z.aliases ?? [])].map(normalizeArabic);
+        if (cands.some((c) => c && (norm.includes(c) || c.includes(norm)))) { newZone = z; break; }
+      }
+      if (!newZone) {
+        const aiZ = await aiParse(env, msg.text, zones, history);
+        if (aiZ?.from) newZone = matchZoneByName(aiZ.from, zones);
+        if (!newZone && aiZ?.to) newZone = matchZoneByName(aiZ.to, zones);
+      }
+      if (newZone) {
+        const from = knownFrom ?? newZone;
+        const to = knownTo ?? newZone;
+        if (from.id !== to.id) {
+          await repo.clearPendingBooking(env.DB, msg.chatId);
+          return handleMessage(env, { ...msg, text: `بدي روح من ${from.name} لعند ${to.name}` });
+        }
+      }
+    }
+  }
+
   // طبقة AI: تعمل فقط إذا ai_enabled=1 والمفتاح موجود + القواعدي ما فهم شي مفيد
   const aiEnabled = (await repo.getSetting(env.DB, 'ai_enabled')) !== '0';
   if (aiEnabled && !isDriver && (parsed.intent === 'UNKNOWN' || (!parsed.from_zone && !parsed.to_zone))) {
@@ -98,9 +127,18 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
         }
       }
       if (!parsed.from_zone || !parsed.to_zone) {
+        // وجه واحد بس؟ نخزنه ونسأل على الباقي بس — بلا صيغ كتابة ولا إعادة كلام
+        const missing = parsed.from_zone ? 'to' : 'from';
+        await repo.setPendingBooking(
+          env.DB, msg.chatId,
+          parsed.from_zone?.id ?? null,
+          parsed.to_zone?.id ?? null
+        );
         return [{
           chatId: msg.chatId,
-          text: 'منين ووين بدك؟ اكتبها هيك:\n«بدي روح من طريق حلب لعند المخيم»',
+          text: missing === 'to'
+            ? `تمام، من ${parsed.from_zone!.name} — وين بدك توصل؟`
+            : `تمام، ع ${parsed.to_zone!.name} — منين رح تطلع؟`,
         }];
       }
       const fares = await repo.getFixedFares(env.DB);

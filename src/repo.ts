@@ -118,6 +118,45 @@ export async function getRecentMessages(
   return (results ?? []).reverse(); // الأقدم أولاً
 }
 
+// ─── حجز معلق ناقص: الزبون أعطى وجه واحد — ننتظر الباقي بدون إعادة السؤال ───
+
+export interface PendingBooking {
+  chat_id: string;
+  from_zone_id: number | null;
+  to_zone_id: number | null;
+}
+
+export async function getPendingBooking(db: D1Database, chatId: string): Promise<PendingBooking | null> {
+  // ينتهي تلقائياً بعد 30 دقيقة صمت
+  return await db
+    .prepare(
+      `SELECT chat_id, from_zone_id, to_zone_id FROM pending_bookings
+       WHERE chat_id = ? AND created_at >= datetime('now', '-30 minutes')`
+    )
+    .bind(chatId)
+    .first<PendingBooking>();
+}
+
+export async function setPendingBooking(
+  db: D1Database, chatId: string, fromZoneId: number | null, toZoneId: number | null
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO pending_bookings (chat_id, from_zone_id, to_zone_id, created_at)
+       VALUES (?, ?, ?, datetime('now'))
+       ON CONFLICT (chat_id) DO UPDATE SET
+         from_zone_id = excluded.from_zone_id,
+         to_zone_id = excluded.to_zone_id,
+         created_at = datetime('now')`
+    )
+    .bind(chatId, fromZoneId, toZoneId)
+    .run();
+}
+
+export async function clearPendingBooking(db: D1Database, chatId: string): Promise<void> {
+  await db.prepare('DELETE FROM pending_bookings WHERE chat_id = ?').bind(chatId).run();
+}
+
 // ─── روتين الزبون: تعلّم من المشاوير المنفذة + ملخص للـ AI ───
 
 export interface ClientRoutine {
