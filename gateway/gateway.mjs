@@ -28,6 +28,7 @@ import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { pino } from 'pino';
 import QRCode from 'qrcode';
+import { transcribeVoice } from './asr.mjs';
 
 const require = createRequire(import.meta.url);
 const {
@@ -37,6 +38,7 @@ const {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   Browsers,
+  downloadMediaMessage,
 } = require('@whiskeysockets/baileys');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -44,6 +46,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ─── الإعدادات ───
 const WORKER_URL = process.env.WORKER_URL ?? 'https://whatsapp-taxi-dispatch.abdalganih2.workers.dev';
 const ADMIN_KEY = process.env.ADMIN_KEY ?? '';
+const AI_API_KEY = process.env.ZAI_API_KEY ?? process.env.AI_API_KEY ?? '';
 const GATEWAY_TOKEN = process.env.GATEWAY_TOKEN ?? ADMIN_KEY; // لوحة ← بوابة
 const HTTP_PORT = Number(process.env.GATEWAY_PORT ?? 3010);
 const POLL_MS = Number(process.env.POLL_MS ?? 1500);
@@ -583,7 +586,7 @@ async function requestOneCode(s, att) {
         m.message.viewOnceMessageV2?.message ??
         m.message.viewOnceMessage?.message ??
         m.message;
-      const text =
+      let text =
         c.conversation ??
         c.extendedTextMessage?.text ??
         c.imageMessage?.caption ??
@@ -593,7 +596,29 @@ async function requestOneCode(s, att) {
         c.interactiveResponseMessage?.body?.text ??
         '';
 
-      console.log(`[INCOMING MSG] 📩 نص الرسالة: "${text}" | من Chat: ${chatId} | النوع: ${type}`);
+      // ─── رسالة صوتية؟ تحويلها لنص عبر GLM-ASR (فوق API KEY للـ AI) ───
+      let voiceNote = false;
+      if (!text.trim() && c.audioMessage && AI_API_KEY) {
+        voiceNote = true;
+        try {
+          const buffer = await downloadMediaMessage(m, 'buffer', {});
+          const mimetype = c.audioMessage.mimetype ?? 'audio/ogg; codecs=opus';
+          const t0 = Date.now();
+          const heard = await transcribeVoice({ buffer, mimetype, apiKey: AI_API_KEY });
+          console.log(`🎙️ [ASR] ${maskPhone(chatId)} — ${Date.now() - t0}ms — "${heard ?? '(فشل التحويل)'}"`);
+          if (heard) {
+            // النص المحوَّل يعامل كرسالة نصية عادية
+            Object.assign(c, { conversation: heard });
+            text = heard;
+          } else {
+            console.log(`🎙️ [ASR] فشل تحويل الصوت — تجاهل (ID: ${msgId})`);
+          }
+        } catch (e) {
+          log.warn({ err: String(e).slice(0, 120) }, 'voice transcribe failed');
+        }
+      }
+
+      console.log(`[INCOMING MSG] 📩 نص الرسالة: "${text}" | من Chat: ${chatId} | النوع: ${type}${voiceNote ? ' | 🎙️ صوتية' : ''}`);
 
       if (!text.trim()) {
         console.log(`[FILTER] ⏭️ تجاوز: رسالة بدون نص قابل للمعالجة ID: ${msgId}`);
