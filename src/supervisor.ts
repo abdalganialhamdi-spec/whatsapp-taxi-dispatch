@@ -26,11 +26,11 @@ export async function runSupervisor(env: Env): Promise<void> {
     }
   } catch { /* جدول ناقص = تجاهل */ }
 
-  // 2) إرسال فاشل نهائياً آخر 24 ساعة (high)
+  // 2) إرسال فاشل نهائياً — فقط آخر ساعة (القديم انصلاح ومحفوظ بالأرشيف)
   try {
     const { results } = await env.DB.prepare(
       `SELECT id, substr(chat_id,1,20) AS c FROM outbox
-       WHERE text LIKE '%فشل الإرسال نهائيا%' AND sent_at >= datetime('now', '-1 day')`
+       WHERE text LIKE '%فشل الإرسال نهائيا%' AND sent_at >= datetime('now', '-1 hour')`
     ).all<{ id: number; c: string }>();
     for (const r of results ?? []) {
       const added = await repo.insertIssue(
@@ -58,7 +58,19 @@ export async function runSupervisor(env: Env): Promise<void> {
   } catch { /* ignore */ }
 
   // 4) محادثات منقطعة: >= 4 وارد آخر 6 ساعات بلا طلب (med)
+  //    الإدارة والسواقين مستثنين — تجاربهم ما بتنحسب «زبون منقطع»
   try {
+    const staff = new Set(
+      (await Promise.all([
+        repo.getSetting(env.DB, 'manager_phone'),
+        repo.getSetting(env.DB, 'admin_phone'),
+      ])).filter(Boolean) as string[]
+    );
+    const { results: drivers } = await env.DB.prepare(
+      `SELECT phone FROM drivers WHERE active = 1`
+    ).all<{ phone: string }>();
+    for (const d of drivers ?? []) staff.add(d.phone);
+
     const { results } = await env.DB.prepare(
       `SELECT sender_phone, COUNT(*) AS n FROM messages
        WHERE direction = 'in' AND created_at >= datetime('now', '-6 hours')
@@ -66,6 +78,7 @@ export async function runSupervisor(env: Env): Promise<void> {
        GROUP BY sender_phone HAVING n >= 4 LIMIT 3`
     ).all<{ sender_phone: string; n: number }>();
     for (const row of results ?? []) {
+      if (staff.has(row.sender_phone)) continue;
       const hasRide = await env.DB.prepare(
         `SELECT id FROM rides WHERE client_phone = ? LIMIT 1`
       ).bind(row.sender_phone).first();
