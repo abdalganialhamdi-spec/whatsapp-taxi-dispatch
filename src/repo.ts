@@ -48,6 +48,114 @@ export async function setDriverLid(db: D1Database, id: number, lid: string): Pro
   await db.prepare('UPDATE drivers SET lid = ? WHERE id = ?').bind(lid, id).run();
 }
 
+// ─── طلبات الانضمام كسائق ───
+
+export interface DriverApplication {
+  id: number;
+  phone: string;
+  name: string;
+  car: string;
+  plate: string;
+  status: string;
+}
+
+export async function getDriverApplication(db: D1Database, phone: string): Promise<DriverApplication | null> {
+  return await db
+    .prepare('SELECT * FROM driver_applications WHERE phone = ? ORDER BY id DESC LIMIT 1')
+    .bind(phone)
+    .first<DriverApplication>();
+}
+
+export async function getDriverApplicationById(db: D1Database, id: number): Promise<DriverApplication | null> {
+  return await db
+    .prepare('SELECT * FROM driver_applications WHERE id = ?')
+    .bind(id)
+    .first<DriverApplication>();
+}
+
+// upsert حقل واحد من الطلب (جمع تدريجي بالحوار)
+export async function upsertDriverApplication(
+  db: D1Database, phone: string, fields: Partial<Pick<DriverApplication, 'name' | 'car' | 'plate'>>
+): Promise<void> {
+  const cur = (await getDriverApplication(db, phone)) ?? { name: '', car: '', plate: '' };
+  const merged = { ...cur, ...fields };
+  await db
+    .prepare(
+      `INSERT INTO driver_applications (phone, name, car, plate, status)
+       VALUES (?, ?, ?, ?, 'pending')
+       ON CONFLICT (phone) DO UPDATE SET name = excluded.name, car = excluded.car, plate = excluded.plate, status = 'pending'`
+    )
+    .bind(phone, merged.name ?? '', merged.car ?? '', merged.plate ?? '')
+    .run();
+}
+
+export async function setDriverApplicationStatus(db: D1Database, id: number, status: string): Promise<void> {
+  await db.prepare('UPDATE driver_applications SET status = ? WHERE id = ?').bind(status, id).run();
+}
+
+export async function addDriver(
+  db: D1Database, a: { phone: string; name: string; car: string; plate: string }
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO drivers (phone, name, car, plate, status, commission_pct, group_jid, active)
+       VALUES (?, ?, ?, ?, 'OFFLINE', 10, '', 1)
+       ON CONFLICT (phone) DO UPDATE SET name = excluded.name, car = excluded.car, plate = excluded.plate, active = 1`
+    )
+    .bind(a.phone, a.name, a.car, a.plate)
+    .run();
+}
+
+// ─── سجل مشاكل المشرف الخلفي ───
+
+export interface Issue {
+  id: number;
+  kind: string;
+  severity: string;
+  detail: string;
+  ref_id: string | null;
+  status: string;
+  created_at: string;
+}
+
+export async function insertIssue(
+  db: D1Database, kind: string, severity: 'high' | 'med' | 'low', detail: string, refId?: string
+): Promise<boolean> {
+  // dedupe: نفس النوع والمرجع ما زال جديد
+  if (refId) {
+    const dup = await db
+      .prepare(`SELECT id FROM issues WHERE kind = ? AND ref_id = ? AND status = 'new'`)
+      .bind(kind, refId)
+      .first();
+    if (dup) return false;
+  }
+  await db
+    .prepare('INSERT INTO issues (kind, severity, detail, ref_id) VALUES (?, ?, ?, ?)')
+    .bind(kind, severity, detail, refId ?? null)
+    .run();
+  return true;
+}
+
+export async function listIssues(db: D1Database, limit = 50): Promise<Issue[]> {
+  const { results } = await db
+    .prepare('SELECT * FROM issues ORDER BY id DESC LIMIT ?')
+    .bind(limit)
+    .all<Issue>();
+  return results ?? [];
+}
+
+export async function countNewIssues(db: D1Database): Promise<number> {
+  const r = await db.prepare(`SELECT COUNT(*) AS n FROM issues WHERE status = 'new'`).first<{ n: number }>();
+  return r?.n ?? 0;
+}
+
+export async function setIssueStatus(db: D1Database, id: number, status: 'acked' | 'fixed'): Promise<void> {
+  await db
+    .prepare(`UPDATE issues SET status = ?, acked_at = datetime('now') WHERE id = ?`)
+    .bind(status, id)
+    .run();
+}
+
 export async function getDriverById(db: D1Database, id: number): Promise<Driver | null> {
   return await db.prepare('SELECT * FROM drivers WHERE id = ?').bind(id).first<Driver>();
 }

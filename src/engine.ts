@@ -116,6 +116,53 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
   // ─── رسائل خاصة ───
   if (isDriver) return handleDriverPrivate(env, msg, driver, parsed.intent);
 
+  // ─── أوامر المدير/المهندس (قبل مسار الزبون): قبل السائق #ID / ارفض السائق #ID ───
+  const managerOrAdmin = await isManagerOrAdmin(env, msg.senderPhone);
+  if (managerOrAdmin) {
+    const approve = normalizeArabic(msg.text).match(/(?:قبل|اقبل)\s*(?:السايق|السائق|#?)\s*#?([0-9٠-٩]{1,6})/);
+    const reject = normalizeArabic(msg.text).match(/(?:ارفض|رفض)\s*(?:السايق|السائق|#?)\s*#?([0-9٠-٩]{1,6})/);
+    const toWestern = (s: string) => s.replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)));
+    if (approve || reject) {
+      const id = Number(toWestern((approve ?? reject)![1]));
+      const app = await repo.getDriverApplicationById(env.DB, id);
+      if (!app || app.status !== 'pending') {
+        return [{ chatId: msg.chatId, text: `ما في طلب سائق رقم ${id} منتظر موافقة.` }];
+      }
+      if (approve) {
+        await repo.setDriverApplicationStatus(env.DB, id, 'approved');
+        await repo.addDriver(env.DB, app);
+        const invite = await repo.getSetting(env.DB, 'drivers_group_invite');
+        const groupJid = await repo.getSetting(env.DB, 'drivers_group_jid');
+        const out: OutboundMessage[] = [
+          { chatId: msg.chatId, text: `✅ انسجل السائق ${app.name} (${app.phone}) — بلشنا ضيفه عالمجموعة.` },
+          { chatId: `${app.phone}@s.whatsapp.net`, text: `🎉 أهلا بيك ${app.name}! صرت سائق معنا.\n` +
+            (invite
+              ? `انضم ع مجموعة السواقين من هالرابط: ${invite}`
+              : 'منضيفك ع مجموعة السواقين هلق — إذا ما وصلتك خلال ربع ساعة كلم المهندس.\nبعدها ابعت «متاح» وقت بتبلش شغل.') },
+        ];
+        // إضافة تلقائية للمجموعة — البوابة بتنفذ cmd://group-add/<phone> (النص = "<groupJid>|<phone>")
+        if (groupJid) out.push({ chatId: `cmd://group-add/${app.phone}`, text: `${groupJid}|${app.phone}` });
+        return out;
+      }
+      await repo.setDriverApplicationStatus(env.DB, id, 'rejected');
+      return [
+        { chatId: msg.chatId, text: `تم رفض طلب السائق ${app.name}.` },
+        { chatId: `${app.phone}@s.whatsapp.net`, text: 'شكرا لاهتمامك — هالمرة ما منقدر نضيفك. منرجع نبلشك إذا انفتح مكان 👋' },
+      ];
+    }
+  }
+
+  // ─── تقديم طلب سائق: جمع تدريجي بالحوار ───
+  if (parsed.intent === 'DRIVER_APPLY') {
+    // أول تقديم: أنشئ صف pending فوراً حتى الرسايل الجاية (UNKNOWN) تكمل الجمع
+    if (!(await repo.getDriverApplication(env.DB, msg.senderPhone))) {
+      await repo.upsertDriverApplication(env.DB, msg.senderPhone, {});
+    }
+  }
+  if (parsed.intent === 'DRIVER_APPLY' || (await repo.getDriverApplication(env.DB, msg.senderPhone))?.status === 'pending') {
+    return handleDriverApply(env, msg);
+  }
+
   switch (parsed.intent) {
     case 'BOOK': {
       const active = await repo.getActiveRideForClient(env.DB, msg.senderPhone);
@@ -266,6 +313,77 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
       return [{ chatId: msg.chatId, text: MENU }];
     }
   }
+}
+
+// مدير أو مهندس؟ (الموافقات للمدير، التقني للمهندس — الاثنين يقدروا يوافقوا)
+async function isManagerOrAdmin(env: Env, phone: string): Promise<boolean> {
+  const manager = await repo.getSetting(env.DB, 'manager_phone');
+  const admin = await repo.getSetting(env.DB, 'admin_phone');
+  return phone === manager || phone === admin;
+}
+
+// جمع بيانات طلب السائق حوارياً — نفس نمط الحجز المعلق
+async function handleDriverApply(env: Env, msg: InboundMessage): Promise<OutboundMessage[]> {
+  let app = await repo.getDriverApplication(env.DB, msg.senderPhone);
+  if (!app) {
+    app = { id: 0, phone: msg.senderPhone, name: '', car: '', plate: '', status: 'pending' };
+  }
+  const norm = normalizeArabic(msg.text);
+
+  // استخراج الحقل من نص الزبون
+  if (!app.name) {
+    // أول شي نطلب الاسم — بس إذا هي أول رسالة (DRIVER_APPLY) ما مناخد منها اسم
+    if (!matchesApplyStart(norm)) {
+      const name = msg.text.replace(/[^\u0600-\u06FF\sA-Za-z]/g, '').trim().slice(0, 40);
+      if (name.length >= 2) {
+        await repo.upsertDriverApplication(env.DB, msg.senderPhone, { name });
+        app.name = name;
+      }
+    }
+  } else if (!app.car) {
+    const car = msg.text.trim().slice(0, 40);
+    if (car.length >= 2) {
+      await repo.upsertDriverApplication(env.DB, msg.senderPhone, { car });
+      app.car = car;
+    }
+  } else if (!app.plate) {
+    const plate = msg.text.replace(/[^0-9٠-٩\u0660-\u0669A-Za-z\u0600-\u06FF\s]/g, '').trim().slice(0, 15);
+    if (plate.length >= 2) {
+      await repo.upsertDriverApplication(env.DB, msg.senderPhone, { plate });
+      app.plate = plate;
+    }
+  }
+
+  // وين وصلنا؟ اسأل عن الناقص أو بلش الموافقة
+  const fresh = await repo.getDriverApplication(env.DB, msg.senderPhone);
+  const cur = fresh ?? app;
+  if (!cur.name) {
+    return [{ chatId: msg.chatId, text: '🚕 منرجع منك! شو اسمك الكامل؟' }];
+  }
+  if (!cur.car) {
+    return [{ chatId: msg.chatId, text: `تمام ${cur.name} — شو سيارتك وموديلها؟ (مثلا: كيا بيكانتو 2020)` }];
+  }
+  if (!cur.plate) {
+    return [{ chatId: msg.chatId, text: 'منيح — آخر شي: شو رقم اللوحة؟' }];
+  }
+
+  // كمل البيانات → إشعار المدير (أو المهندس إذا ما في مدير)
+  const approver = (await repo.getSetting(env.DB, 'manager_phone')) || (await repo.getSetting(env.DB, 'admin_phone'));
+  const out: OutboundMessage[] = [{
+    chatId: msg.chatId,
+    text: `✅ تمام ${cur.name}! وصلنا طلبك كامل:\n🚗 ${cur.car}\n🔢 لوحة: ${cur.plate}\n📞 ${cur.phone}\nرح يوصلك الرد قريب إنشالله 🙏`,
+  }];
+  if (approver) {
+    out.push({
+      chatId: `${approver}@s.whatsapp.net`,
+      text: `📋 طلب سائق جديد #${cur.id}:\n👤 ${cur.name}\n📞 +${cur.phone}\n🚗 ${cur.car}\n🔢 لوحة: ${cur.plate}\n— للموافقة رد «قبل السائق ${cur.id}» وللرفض «ارفض السائق ${cur.id}»`,
+    });
+  }
+  return out;
+}
+
+function matchesApplyStart(norm: string): boolean {
+  return ['بدي صير', 'بدي انسجل', 'بدي اشتغل', 'شفرة'].some((p) => norm.includes(p));
 }
 
 async function handleGroup(

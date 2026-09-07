@@ -23,6 +23,7 @@ export interface ParsedMessage {
     | 'DRIVER_ARRIVED'   // وصلت
     | 'DRIVER_START'     // مشي / بديت
     | 'DRIVER_DONE'      // خلصت / استلمت
+    | 'DRIVER_APPLY'     // بدي صير سائق / بدي انسجل
     | 'HELP' | 'UNKNOWN';
   from_zone: Zone | null;
   to_zone: Zone | null;
@@ -71,8 +72,12 @@ const DRIVER_ARRIVED = ['وصلت', 'صرت ع', 'صرت قدام', 'واصل'];
 const DRIVER_START = ['بديت', 'مشي حالك', 'انطلقنا', 'عالطريق', 'رايحين'];
 const DRIVER_DONE = ['خلصت', 'انتهت', 'استلمت', 'الكا في', 'تم الدفع', 'وصلنا', 'استوفيت'];
 
+// تقديم طلب سائق
+const DRIVER_APPLY = ['بدي صير سائق', 'بدي انسجل سائق', 'بدي صير تكسي', 'بدي اشتغل معكن', 'بدي اشتغل معكم', 'شفرة سائق', 'بدي انضم'];
+
 function matchesAny(norm: string, patterns: string[]): boolean {
-  return patterns.some((p) => norm.includes(p));
+  // النمط نفسه ينطبع قبل المقارنة — وإلا ئ→ي وة→ه بالأنماط تخليها ما تطابق أبداً
+  return patterns.some((p) => norm.includes(normalizeArabic(p)));
 }
 
 /** استخراج "من X ل/ع/الى Y" — يدعم: بدي روح من طريق حلب لعند المخيم */
@@ -135,6 +140,7 @@ export function parseMessage(raw: string, zones: Zone[], isDriver: boolean): Par
   }
 
   // الزبون
+  if (matchesAny(norm, DRIVER_APPLY)) return { intent: 'DRIVER_APPLY', from_zone: from, to_zone: to, raw };
   if (matchesAny(norm, HUMAN_PATTERNS)) return { intent: 'TALK_HUMAN', from_zone: from, to_zone: to, raw };
   if (matchesAny(norm, MY_RIDES_PATTERNS)) return { intent: 'MY_RIDES', from_zone: from, to_zone: to, raw };
   if (matchesAny(norm, CANCEL_PATTERNS)) return { intent: 'CANCEL', from_zone: from, to_zone: to, raw };

@@ -739,6 +739,27 @@ async function outboxLoop() {
             if (shuttingDown) break;
             // انقطع الاتصال أثناء الدفعة؟ أكّد المُرسل واقف — الباقي يُسحب لاحقاً
             if (!sock || state.connection !== 'connected') break;
+
+            // ─── أوامر خاصة للبوابة (من الـ Worker عبر outbox) ───
+            // cmd://group-add/<phone> — إضافة سائق لمجموعة السواقين تلقائياً بعد الموافقة
+            if (String(m.chat_id).startsWith('cmd://group-add/')) {
+              const phone = String(m.chat_id).split('cmd://group-add/')[1]?.replace(/\D/g, '');
+              // النص الجاي من الـ Worker = "<groupJid>|<phone>" — البوابة ما إلها وصول للـ D1
+              const groupJid = (String(m.text).split('|')[0] || '').trim();
+              try {
+                if (!phone || !groupJid) throw new Error('phone or group missing');
+                const res = await sock.groupParticipantsUpdate(groupJid, [`${phone}@s.whatsapp.net`], 'add');
+                log.info({ phone: maskPhone(phone), res: JSON.stringify(res).slice(0, 120) }, 'group-add ok');
+                sent.push(m.id);
+              } catch (e) {
+                const s = String(e);
+                // رقم ماسك الخصوصية أو ما بنضيف مباشرة → fall back لرابط الدعوة (الـ Worker بيبعته)
+                log.warn({ phone: maskPhone(phone), err: s.slice(0, 140) }, 'group-add failed (invite fallback?)');
+                sent.push(m.id); // ما منعتبره فشل — الرابط البديل بيتبعت من الـ Worker
+              }
+              continue;
+            }
+
             try {
               const resp = await sock.sendMessage(resolveJid(m.chat_id), { text: m.text });
               if (!resp?.key?.id) throw new Error(`no message id returned (resp=${JSON.stringify(resp).slice(0, 120)})`);

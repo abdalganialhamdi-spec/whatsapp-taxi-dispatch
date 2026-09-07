@@ -15,8 +15,14 @@ import { handleMessage, type InboundMessage } from './engine.js';
 import * as repo from './repo.js';
 import type { Env } from './types.js';
 import { adminPage, adminApi, type AdminPageId } from './admin.js';
+import { runSupervisor } from './supervisor.js';
 
 export default {
+  async scheduled(_event: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
+    // المشرف الخلفي — فشله ما بيأثر ع المسار الحي أبداً
+    try { await runSupervisor(env); } catch { /* صامت */ }
+  },
+
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -124,7 +130,7 @@ async function handleAdmin(request: Request, env: Env, path: string): Promise<Re
     return adminApi(request, env, path.slice('/admin/api/'.length));
   }
   const m = path.match(/^\/admin\/([a-z]+)/);
-  const PAGES = new Set(['chats', 'pricing', 'drivers', 'rides', 'settings', 'whatsapp']);
+  const PAGES = new Set(['chats', 'pricing', 'drivers', 'rides', 'issues', 'settings', 'whatsapp']);
   const page: AdminPageId = m && PAGES.has(m[1]) ? (m[1] as AdminPageId) : 'home';
   return adminPage(env, page, key);
 }

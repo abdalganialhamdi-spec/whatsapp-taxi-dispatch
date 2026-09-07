@@ -9,7 +9,7 @@
  *   /admin/whatsapp  ربط واتساب
  */
 
-import { todayStats, getConversations, getChatMessages, getPausedChats, setPaused, queueOutbox } from './repo.js';
+import { todayStats, getConversations, getChatMessages, getPausedChats, setPaused, queueOutbox, listIssues, setIssueStatus } from './repo.js';
 import { aiChat } from './ai.js';
 import { formatSYP } from './pricing.js';
 import { whatsappTabHtml } from './whatsapp-tab.js';
@@ -48,6 +48,7 @@ const NAV: Array<{ id: string; href: string; label: string }> = [
   { id: 'pricing', href: '/admin/pricing', label: '💰 الأسعار' },
   { id: 'drivers', href: '/admin/drivers', label: '🧑‍✍️ السواقون' },
   { id: 'rides', href: '/admin/rides', label: '🧾 الرحلات' },
+  { id: 'issues', href: '/admin/issues', label: '⚠️ المشاكل' },
   { id: 'settings', href: '/admin/settings', label: '⚙️ الإعدادات' },
   { id: 'whatsapp', href: '/admin/whatsapp', label: '📱 واتساب' },
 ];
@@ -260,7 +261,7 @@ function escHtml(s: unknown): string {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 }
 
-export type AdminPageId = 'home' | 'chats' | 'pricing' | 'drivers' | 'rides' | 'settings' | 'whatsapp';
+export type AdminPageId = 'home' | 'chats' | 'pricing' | 'drivers' | 'rides' | 'issues' | 'settings' | 'whatsapp';
 
 export async function adminPage(env: Env, page: AdminPageId, key: string): Promise<Response> {
   let body = '';
@@ -590,6 +591,37 @@ function cancelRide(id) {
   if (confirm('إلغاء الرحلة ' + id + '؟')) api('ride.cancel', { id });
 }
 `;
+  } else if (page === 'issues') {
+    const issues = await listIssues(env.DB, 50);
+    const newCount = issues.filter((i: { status: string }) => i.status === 'new').length;
+    title = 'المشاكل';
+    body = `<p class="page-desc">كشف المشرف الخلفي كل 30 دقيقة — الطلبات العالقة، الإرسال الفاشل، المحادثات المنقطعة وغيرها. <b>${newCount}</b> مشكلة جديدة.</p>
+<div class="box"><button onclick="runSupervisorNow()" class="small">🔍 فحص فوري هلق</button> <span id="sup-result" style="margin-inline-start:8px"></span></div>
+<div class="box" style="padding:0;overflow-x:auto">
+<table>
+  <tr><th>الوقت</th><th>النوع</th><th>الخطورة</th><th>التفاصيل</th><th>الحالة</th><th></th></tr>
+  ${issues.length ? issues.map((i) => `<tr>
+    <td dir="ltr" style="white-space:nowrap">${escHtml((i.created_at ?? '').slice(5, 16))}</td>
+    <td>${escHtml(i.kind)}</td>
+    <td>${i.severity === 'high' ? '🔴' : i.severity === 'med' ? '🟡' : '⚪'} ${escHtml(i.severity)}</td>
+    <td style="max-width:420px">${escHtml(i.detail)}</td>
+    <td>${i.status === 'new' ? '<b style="color:var(--danger)">جديد</b>' : i.status === 'acked' ? 'مقروء' : '✅ منحل'}</td>
+    <td style="white-space:nowrap">${i.status !== 'fixed' ? `<button class="small" onclick="api('issue.ack', {id:${i.id}})">قرأته</button> <button class="small" onclick="api('issue.fix', {id:${i.id}})">انحل</button>` : ''}</td>
+  </tr>`).join('') : '<tr><td colspan="6" style="text-align:center;padding:24px">ما في مشاكل مسجلة 🎉</td></tr>'}
+</table>
+</div>`;
+    pageJs = `
+async function runSupervisorNow() {
+  const el = document.getElementById('sup-result');
+  el.textContent = '… عم يفحص';
+  try {
+    const r = await fetch('/admin/api?key=' + encodeURIComponent(K), { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ action: 'supervisor.run' }) });
+    const d = await r.json();
+    el.textContent = d.ok ? '✅ خلص الفحص — حدث الصفحة' : 'فشل: ' + (d.error || '');
+    if (d.ok) setTimeout(() => location.reload(), 800);
+  } catch (e) { el.textContent = 'خطأ شبكة'; }
+}
+`;
   } else if (page === 'settings') {
     const { results: settings } = await env.DB.prepare(`SELECT key, value FROM settings ORDER BY key`).all();
     title = 'الإعدادات';
@@ -604,14 +636,15 @@ function cancelRide(id) {
       `<div class="set-row"><span class="lab">${label}</span>
         <input name="${k}" value="${escHtml(sm[k] ?? '')}" dir="ltr" style="width:260px">
         <span class="hint">${hint}</span></div>`;
-    const known = new Set(['bot_enabled', 'ai_enabled', 'ai_chat', 'admin_phone', 'drivers_group_jid', 'paused_chats']);
+    const known = new Set(['bot_enabled', 'ai_enabled', 'ai_chat', 'admin_phone', 'manager_phone', 'drivers_group_jid', 'drivers_group_invite', 'paused_chats']);
     const others = (settings ?? []).filter((s: any) => !known.has(s.key));
     body = `<p class="page-desc">مفاتيح التشغيل — غيّر واحفظ بزر واحد.</p>
 <form class="box" onsubmit="return saveSettings(event, this)">
   ${boolRow('bot_enabled', '🤖 البوت', 'شغال = بيرد على الزبائن — مطفي = رسالة صيانة فقط')}
   ${boolRow('ai_enabled', '🧠 مساعد AI للفهم', 'بيساعد البوت يفهم الرسائل المكتوبة بطرق مختلفة')}
   ${boolRow('ai_chat', '💬 رد AI حر', 'عند رسالة ما فهمها البوت بيرد AI بالعامية — بدون أسعار أبداً')}
-  ${textRow('admin_phone', '📞 رقم المدير', 'بيستقبل تنبيه «بدي احكي مع المهندس» — صيغة دولية بدون +')}
+  ${textRow('manager_phone', '👔 رقم المدير', 'الموافقات — طلبات السواقين الجدد توصله (صيغة دولية بدون +)')}
+  ${textRow('admin_phone', '🛠 رقم المهندس', 'المشاكل التقنية وتقارير المشرف توصله (صيغة دولية بدون +)')}
   ${textRow('drivers_group_jid', '👥 مجموعة السواقين', 'بينحط تلقائياً — لا تغيرو إلا إذا نقلت المجموعة')}
   <div class="set-row"><span class="lab">⏸ المحادثات الموقوفة</span>
     <span dir="ltr">${escHtml(sm['paused_chats'] ?? '[]')}</span>
@@ -753,6 +786,21 @@ export async function adminApi(request: Request, env: Env, action: string): Prom
         arr.splice(Number(body.index), 1);
         await env.DB.prepare(`UPDATE zones SET aliases = ? WHERE id = ?`).bind(JSON.stringify(arr), Number(body.id)).run();
         return Response.json({ ok: true, aliases: arr });
+      }
+
+      // ─── المشاكل (المشرف الخلفي) ───
+      case 'issue.ack': {
+        await setIssueStatus(env.DB, Number(body.id), 'acked');
+        return Response.json({ ok: true });
+      }
+      case 'issue.fix': {
+        await setIssueStatus(env.DB, Number(body.id), 'fixed');
+        return Response.json({ ok: true });
+      }
+      case 'supervisor.run': {
+        const { runSupervisor } = await import('./supervisor.js');
+        await runSupervisor(env);
+        return Response.json({ ok: true });
       }
 
       // ─── تعاريف ───

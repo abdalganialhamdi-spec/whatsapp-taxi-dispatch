@@ -87,6 +87,16 @@ export async function aiParse(
         if (attempt === 0) continue;
         return null;
       }
+      // أسماء رجّعها AI غير موجودة بالقائمة؟ محاولة ثانية بطلب توضيحي —
+      // المودل بيصرّف الأسماء الشعبية (البرناوي→التعاونية) بدون تعديل كود لكل اسم جديد
+      const unmatched = [parsed.from, parsed.to].filter(
+        (n) => n && !zones.some((z) => [z.name, ...(z.aliases ?? [])]
+          .some((c) => normalizeArabic(c) === normalizeArabic(n)))
+      );
+      if (unmatched.length && attempt === 0) {
+        body.system += `\n\nتنبيه: الأسماء التالية مو من قائمتك: ${unmatched.join('، ')}. أعد الإجابة واستبدل كل وحدة بأقرب منطقة رسمية من القائمة (أو null إذا ما في قريبة منطقية). نفس intent.`;
+        continue;
+      }
       return parsed;
     } catch {
       if (attempt === 0) continue; // مهلة أو شبكة — محاولة ثانية قبل الاستسلام
