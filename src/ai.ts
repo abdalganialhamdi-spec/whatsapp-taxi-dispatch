@@ -14,6 +14,12 @@ export interface AiIntent {
   reply?: string;      // رد حر (للدردشة غير المفهومة) — اختياري
 }
 
+// سطر سياق من سجل الرسائل — «دور» + «النص»
+function historyLine(m: { direction: string; sender_phone: string; text: string }): string {
+  const who = m.direction === 'out' ? 'البوت' : (m.sender_phone === 'BOT' ? 'البوت' : 'الزبون');
+  return `${who}: ${m.text.slice(0, 200)}`;
+}
+
 const SYSTEM_PROMPT = `أنت محلل رسائل لهجة حماة السورية لحجز تاكسي. حوّل رسالة المستخدم إلى JSON فقط بلا أي شرح أو علامات markdown.
 المخطط: {"intent":"BOOK|PRICE_QUERY|CONFIRM|CANCEL|MY_RIDES|TALK_HUMAN|UNKNOWN","from":"اسم المنطقة بحماة أو null","to":"اسم المنطقة بحماة أو null"}
 أمثلة:
@@ -28,15 +34,25 @@ const SYSTEM_PROMPT = `أنت محلل رسائل لهجة حماة السوري
 
 
 /** استعلام AI — يرجع null إذا غير مفعّل أو فشل */
-export async function aiParse(env: Env, text: string, zones: Zone[]): Promise<AiIntent | null> {
+export async function aiParse(
+  env: Env, text: string, zones: Zone[],
+  history: Array<{ direction: string; sender_phone: string; text: string }> = [],
+  routine?: string
+): Promise<AiIntent | null> {
   if (!env.AI_API_KEY || !env.AI_BASE_URL) return null;
 
   const zoneList = zones.map((z) => z.name).join('، ');
+  const historyBlock = history.length
+    ? `\nمحادثة سابقة بنفس الجلسة (الأقدم أولاً) — استعملها لفهم النص المقطوع أو المجيب على سؤالك السابق:\n${history.map(historyLine).join('\n')}`
+    : '';
+  const routineBlock = routine
+    ? `\nروتين الزبون المعروف (من مشاويره السابقة):\n${routine}\nإذا رسالته غامضة/مقطوعة، استنتج نيتها من روتينه بحسب اليوم والساعة الحاليين، واستعمل من/إلى الروتين الأنسب. إذا اليوم شاذ عن عادته (مثلاً الجمعة وهو دايماً يطلع أيام الدوام)، رجّع UNKNOWN عشان نسأله بدل ما نخمّن غلط.`
+    : '';
   const body = {
     model: env.AI_MODEL ?? 'glm-5.3-flash',
     max_tokens: 300,
     thinking: { type: 'disabled' }, // GLM thinking blocks بتاكل الـ tokens وما بترجع JSON
-    system: SYSTEM_PROMPT + `\nأسماء المناطق المتاحة حالياً: ${zoneList}`,
+    system: SYSTEM_PROMPT + `\nأسماء المناطق المتاحة حالياً: ${zoneList}${historyBlock}${routineBlock}`,
     messages: [{ role: 'user', content: text }],
   };
 
@@ -67,9 +83,17 @@ export async function aiParse(env: Env, text: string, zones: Zone[]): Promise<Ai
 }
 
 /** محادثة AI حرة (رد على عميل / تلخيص محادثة) — ترجع النص أو null */
-export async function aiChat(env: Env, system: string, user: string, maxTokens = 500): Promise<string | null> {
+export async function aiChat(
+  env: Env, system: string, user: string, maxTokens = 500,
+  history: Array<{ direction: string; sender_phone: string; text: string }> = []
+): Promise<string | null> {
   if (!env.AI_API_KEY || !env.AI_BASE_URL) return null;
   try {
+    // آخر 6 رسايل (قبل الحالية) كدور محادثة حقيقي — AI بيرد وكأنه صاحب المحادثة
+    const convo = history.slice(-6).map((m) => ({
+      role: (m.direction === 'out' || m.sender_phone === 'BOT') ? 'assistant' : 'user',
+      content: m.text.slice(0, 300),
+    }));
     const res = await fetch(`${env.AI_BASE_URL}/v1/messages`, {
       method: 'POST',
       headers: {
@@ -82,7 +106,7 @@ export async function aiChat(env: Env, system: string, user: string, maxTokens =
         max_tokens: maxTokens,
         thinking: { type: 'disabled' },
         system,
-        messages: [{ role: 'user', content: user }],
+        messages: [...convo, { role: 'user', content: user }],
       }),
       signal: AbortSignal.timeout(20000),
     });

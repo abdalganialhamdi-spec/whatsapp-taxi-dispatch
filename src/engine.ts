@@ -53,12 +53,18 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
     return [];
   }
   const isDriver = !!driver;
+
+  // سياق المحادثة (آخر 8 رسايل قبل الحالية) — تُجمع قبل توثيق الحالية حتى ما تكررها
+  const history = await repo.getRecentMessages(env.DB, msg.chatId, 8);
+
   let parsed = parseMessage(msg.text, zones, isDriver);
 
   // طبقة AI: تعمل فقط إذا ai_enabled=1 والمفتاح موجود + القواعدي ما فهم شي مفيد
   const aiEnabled = (await repo.getSetting(env.DB, 'ai_enabled')) !== '0';
   if (aiEnabled && !isDriver && (parsed.intent === 'UNKNOWN' || (!parsed.from_zone && !parsed.to_zone))) {
-    const ai = await aiParse(env, msg.text, zones);
+    // إذا الرسالة غير واضحة: روتين الزبون يوضّح المقصود (عميل أ الساعة ٧ = من البيت للدوام)
+    const routine = parsed.intent === 'UNKNOWN' ? await repo.getRoutineSummary(env.DB, msg.senderPhone) : '';
+    const ai = await aiParse(env, msg.text, zones, history, routine);
     if (ai && ai.intent !== 'UNKNOWN') {
       const from = matchZoneByName(ai.from, zones);
       const to = matchZoneByName(ai.to, zones);
@@ -205,11 +211,15 @@ export async function handleMessage(env: Env, msg: InboundMessage): Promise<Outb
       // رد AI حر (ai_chat=1): للخاص غير السواقين فقط — ممنوع عليه ذكر أي سعر
       const aiChatOn = !isDriver && !msg.isGroup && (await repo.getSetting(env.DB, 'ai_chat')) === '1';
       if (aiChatOn) {
+        // بروفايل الزبون: روتينه المعروف + مشاويره الأخيرة — حتى يعرفه ويفهم روتينه
+        const routine = await repo.getRoutineSummary(env.DB, msg.senderPhone);
+        const profile = routine ? `\n\nروتين هالزبون المعروف عندنا (من مشاويره السابقة):\n${routine}\nإذا رسالته غامضة وتنطبق على روتينه، اقترح عليه روتينه واسأله للتأكيد (مثلاً إذا يوم مختلف عن عادته اسأله). ما تحجز بداله — بس اقترح واسأل.` : '';
         const reply = await aiChat(
           env,
-          'أنت مساعد شركة مشاوير الحموي للتاكسي بحماة، ترد بالعامية الحموية باختصار (سطرين max). قواعد صارمة: ممنوع منعاً باتاً ذكر أي سعر أو رقم أجرة — التعرفة بيحددها النظام فقط. إذا الزبون بده يحجز اطلب منه «من وين لوين». إذا معصب أو بده موظف قله اكتب «المهندس». لا تخترع مناطق ولا مواعيد.',
+          'أنت مساعد شركة مشاوير الحموي للتاكسي بحماة، ترد بالعامية الحموية باختصار (سطرين max). قواعد صارمة: ممنوع منعاً باتاً ذكر أي سعر أو رقم أجرة — التعرفة بيحددها النظام فقط. إذا الزبون بده يحجز اطلب منه «من وين لوين». إذا معصب أو بده موظف قله اكتب «المهندس». لا تخترع مناطق ولا مواعيد.' + profile,
           msg.text,
-          300
+          300,
+          history
         );
         if (reply) return [{ chatId: msg.chatId, text: reply }];
       }
@@ -316,6 +326,10 @@ async function handleDriverPrivate(
       await repo.updateRideStatus(env.DB, ride.id, 'DONE');
       await repo.setDriverStatus(env.DB, driver.id, 'AVAILABLE');
       await repo.notifyClient(env.DB, ride.id, `🏁 وصلت بالسلامة! الأجرة ${formatSYP(ride.price ?? 0)} — تقييمك يهمنا 🙏`);
+      // تعلّم الروتين: مشوار منفذ = نقطة روتين للزبون
+      if (ride.from_zone_id && ride.to_zone_id) {
+        await repo.learnRoutine(env.DB, ride.client_phone, ride.from_zone_id, ride.to_zone_id, ride.created_at);
+      }
       const commission = ride.price ? Math.round((ride.price * driver.commission_pct) / 100) : 0;
       return [{
         chatId: msg.chatId,

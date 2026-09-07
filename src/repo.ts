@@ -104,6 +104,78 @@ export async function getClientRides(db: D1Database, phone: string, limit = 5): 
   return results ?? [];
 }
 
+// آخر رسايل محادثة (وارد+صادر) — سياق للـ AI (فهم النص المقطوع + دردشة بذاكرة)
+export async function getRecentMessages(
+  db: D1Database, chatId: string, limit = 8
+): Promise<Array<{ direction: string; sender_phone: string; text: string }>> {
+  const { results } = await db
+    .prepare(
+      `SELECT direction, sender_phone, text FROM messages
+       WHERE chat_id = ? ORDER BY id DESC LIMIT ?`
+    )
+    .bind(chatId, limit)
+    .all<{ direction: string; sender_phone: string; text: string }>();
+  return (results ?? []).reverse(); // الأقدم أولاً
+}
+
+// ─── روتين الزبون: تعلّم من المشاوير المنفذة + ملخص للـ AI ───
+
+export interface ClientRoutine {
+  id: number;
+  phone: string;
+  from_zone_id: number;
+  to_zone_id: number;
+  from_name: string;
+  to_name: string;
+  dow: number | null;   // 0=الأحد..6=السبت، null=كل يوم
+  hour: number;
+  hits: number;
+}
+
+const DOW_AR = ['الأحد', 'الإتنين', 'التلاتة', 'الأربع', 'الخميس', 'الجمعة', 'السبت'];
+
+// تعلّم: مشوار منفذ (DONE) = نقطة روتين. الساعة بتوقيت سوريا (UTC+3)
+export async function learnRoutine(
+  db: D1Database, phone: string, fromZoneId: number, toZoneId: number, createdAt: string | null
+): Promise<void> {
+  const d = createdAt ? new Date(createdAt) : new Date();
+  const local = new Date(d.getTime() + 3 * 3600_000); // سوريا UTC+3
+  const dow = local.getUTCDay();
+  const hour = local.getUTCHours();
+  await db
+    .prepare(
+      `INSERT INTO client_routines (phone, from_zone_id, to_zone_id, dow, hour, hits, last_at)
+       VALUES (?, ?, ?, ?, ?, 1, datetime('now'))
+       ON CONFLICT (phone, from_zone_id, to_zone_id, dow, hour)
+       DO UPDATE SET hits = hits + 1, last_at = datetime('now'), active = 1`
+    )
+    .bind(phone, fromZoneId, toZoneId, dow, hour)
+    .run();
+}
+
+// ملخص نصي عربي لروتين الزبون — يُحقن ببرومبت الـ AI
+export async function getRoutineSummary(db: D1Database, phone: string): Promise<string> {
+  const { results } = await db
+    .prepare(
+      `SELECT r.*, zf.name AS from_name, zt.name AS to_name
+       FROM client_routines r
+       JOIN zones zf ON zf.id = r.from_zone_id
+       JOIN zones zt ON zt.id = r.to_zone_id
+       WHERE r.phone = ? AND r.active = 1 AND r.hits >= 2
+       ORDER BY r.hits DESC LIMIT 6`
+    )
+    .bind(phone)
+    .all<ClientRoutine>();
+  if (!results?.length) return '';
+  return results
+    .map((r) => {
+      const day = r.dow === null ? 'كل يوم' : `كل يوم ${DOW_AR[r.dow] ?? r.dow}`;
+      const hh = String(r.hour).padStart(2, '0') + ':00';
+      return `- ${day} حوالي الساعة ${hh} من ${r.from_name} إلى ${r.to_name} (${r.hits} مرات)`;
+    })
+    .join('\n');
+}
+
 export async function getActiveRideForClient(db: D1Database, phone: string): Promise<Ride | null> {
   return await db
     .prepare(
